@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Dati e risorse: LOCALI, non versionati (vedi note.txt).
+# I dati raw si rigenerano col repo ingestion-documenti-papi.
+data/
+resources/
+*.log

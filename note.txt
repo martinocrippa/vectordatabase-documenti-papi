@@ -1,0 +1,17 @@
+DATI NON INCLUSI NEL REPOSITORY
+================================
+
+Le cartelle data/ e resources/ sono LOCALI e non versionate (vedi .gitignore).
+
+- data/       Corpus markdown dei documenti dei Papi (~25.000 file).
+              Si rigenera eseguendo il repository:
+                https://github.com/martinocrippa/ingestion-documenti-papi
+                (python papi.py  ->  produce data/<papa>/<tipologia>/*.md)
+              Poi copia/sposta la cartella data/ qui dentro.
+
+- resources/  Materiali di ricerca (review tecniche, paper, risultati
+              preliminari). Locali.
+
+La cartella esempio/ contiene UN documento finto che mostra la struttura
+attesa di data/. I dati reali non sono pubblicati: copyright dei testi e
+comunque rigenerabili dal repo di ingestion.
