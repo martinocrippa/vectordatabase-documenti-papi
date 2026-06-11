@@ -9,3 +9,7 @@ venv/
 data/
 resources/
 *.log
+
+# Indice vettoriale generato: rigenerabile e contiene spezzoni dei testi
+# (materiale sotto copyright). Locale, non versionato.
+indice/
