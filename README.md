@@ -65,6 +65,8 @@ In [`doc/`](doc/):
   rispetto del copyright.
 - [`doc/architettura.md`](doc/architettura.md) — il disegno tecnico: poche
   primitive, dipendenze minime, tutto locale.
+- [`doc/mappa-tipologie.md`](doc/mappa-tipologie.md) — struttura dei documenti
+  per tipologia e strategia di chunking ibrido (struttura + overlap).
 - [`doc/piano-di-sviluppo.md`](doc/piano-di-sviluppo.md) — gli stadi di sviluppo,
   uno per volta.
 

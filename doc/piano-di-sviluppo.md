@@ -19,9 +19,11 @@ sono quelle descritte in [`architettura.md`](architettura.md).
 - [ ] `documenti(data_dir)`: scorre `data/**.md`, separa frontmatter YAML e
   corpo, restituisce un dict per documento (parsing del frontmatter a mano, è
   banale: niente nuove dipendenze).
-- [ ] `pezzi(documento)`: spezza il corpo in chunk di ~200–400 parole con piccola
-  sovrapposizione, taglia preferibilmente sui confini di paragrafo, propaga i
-  metadati a ogni chunk.
+- [ ] `pezzi(documento)`: chunking **ibrido struttura+overlap** secondo la
+  [mappa delle tipologie](mappa-tipologie.md) — taglia prima sui confini
+  strutturali (sezioni numerate, separatori, coda multilingua), impacchetta fino
+  a ~200–400 parole, overlap solo dentro la stessa sezione; propaga i metadati e
+  l'etichetta di sezione a ogni chunk.
 - [ ] Test sull'`esempio/` (e, se presente, su `data/`).
 
 **Risultato:** da `data/` si ottiene un flusso di chunk con metadati. Nessun

@@ -25,7 +25,7 @@ ingestion si regge sui suoi:
 | Primitiva | Cosa fa |
 |---|---|
 | `documenti(data_dir)` | generatore: scorre `data/**.md`, separa frontmatter e corpo, restituisce un dict per documento. |
-| `pezzi(documento)` | spezza il corpo in **chunk** sovrapponibili (~200–400 parole), portandosi dietro i metadati del documento. |
+| `pezzi(documento)` | spezza il corpo in **chunk** seguendo la struttura della tipologia (sezioni numerate/separatori/paragrafi) con overlap solo *dentro* la sezione, portandosi dietro i metadati. Ricetta per tipo in [`mappa-tipologie.md`](mappa-tipologie.md). |
 | `Embedder` | incapsula il modello locale di embedding; `encode(testi) -> matrice di vettori` (normalizzati). |
 | `Indice` | tiene i vettori (matrice NumPy) + i metadati paralleli; `aggiungi`, `salva`, `carica`, `cerca(vettore, k)`. |
 
