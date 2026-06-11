@@ -66,16 +66,51 @@ comune' e quando?" — che il conteggio di parole chiave non sapeva cogliere).
 > Libreria Editrice Vaticana — uso personale e di studio, con citazione della
 > fonte. In alternativa si può usare un modello locale e non far uscire nulla.
 
-## Stadio 5 — Oltre la v1 (quando servirà davvero)
+## Stadio 5 — Arricchimento (topic, entità, sentiment, frame)
+
+Dopo che la ricerca della v1 funziona, si arricchisce il corpus con campi
+analitici. **Principio KISS che tiene tutto in riga:** ogni arricchimento è un
+modulo indipendente che **legge i documenti/chunk e aggiunge campi a
+`meta.jsonl`**, senza toccare né l'indice vettoriale né la ricerca di base. Si
+fa uno alla volta, ognuno committabile da solo; se uno non serve, si salta
+senza conseguenze sugli altri. La primitiva nuova è una sola:
+
+```
+arricchisci(nome, fn)   # applica fn a ogni documento e scrive i campi in meta.jsonl
+```
+
+I confronti tra Papi e nel tempo nascono poi **filtrando e raggruppando** su
+questi campi, esattamente come i filtri `--papa/--tipo` della ricerca.
+
+- [ ] **5a — Topic modeling.** Raggruppa i documenti per tema *emergente* (non
+  per parole chiave fissate a mano: era il limite del `check_dati.py`
+  dell'ingestion). Approccio KISS e locale: clustering sugli embeddings già
+  calcolati (es. BERTopic, o k-means + parole rappresentative per cluster).
+  Campo aggiunto: `topic`. Riusa i vettori dell'indice, nessun ricalcolo.
+- [ ] **5b — Entità (NER).** Persone, luoghi, organizzazioni citati. Locale con
+  un modello italiano (es. spaCy `it_core_news_lg`). Campi: `entita` (liste).
+  Utile per "chi/cosa nomina un Papa e con che frequenza".
+- [ ] **5c — Sentiment / tono.** Tono del testo (es. consolatorio, esortativo,
+  di denuncia) più che il semplice positivo/negativo, poco adatto a testi
+  pastorali. Si parte da un classificatore italiano locale e si valuta sui dati.
+  Campo: `sentiment` / `tono`.
+- [ ] **5d — Frame morali/valoriali.** I valori richiamati (es. cura, giustizia,
+  autorità, sacralità — sullo stile della Moral Foundations Theory). Più
+  esplorativo: probabile uso di un LLM con prompt mirato. Campo: `frame`.
+
+> **Copyright/account, di nuovo.** 5a–5c possono restare **interamente locali**
+> (nessun testo esce). 5d, se usa un LLM esterno, segue le stesse regole dello
+> Stadio 4: account/chiave **personale**, solo i passaggi necessari, testi ©
+> LEV per uso personale e di studio. In alternativa, modello locale.
+
+## Stadio 6 — Oltre (quando servirà davvero)
 
 Da affrontare **solo se e quando un bisogno reale lo chiede**, non in anticipo:
 
 - **Indice approssimato** (`hnswlib`/`faiss`) se la ricerca lineare diventa
   lenta — cambiamento isolato dietro `Indice.cerca`.
-- **Arricchimento** (topic, entità, sentiment, frame valoriali) come stadio a
-  parte che aggiunge campi ai metadati, senza toccare la ricerca di base.
 - **Esposizione** (confronti tra pontificati, trend nel tempo, dashboard): vive
-  nel repo di analisi, alimentato da questo indice.
+  nel repo di analisi, alimentato da questo indice arricchito.
 
 ## Filo conduttore
 
