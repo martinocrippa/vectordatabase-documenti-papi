@@ -9,8 +9,8 @@ sono quelle descritte in [`architettura.md`](architettura.md).
 
 - [x] `doc/` con sintesi del corpus, architettura e questo piano.
 - [x] `.gitignore` che esclude `data/`, `resources/`, `indice/`.
-- [ ] `requirements.txt` (`sentence-transformers`, `numpy`) e
-  `setup/environment.yml`, sullo stile del repo di ingestion.
+- [x] `requirements.txt` (`sentence-transformers`, `numpy`, `rank-bm25`).
+- [ ] `setup/environment.yml`, sullo stile del repo di ingestion.
 
 **Risultato:** l'ambiente si installa e la direzione è scritta.
 
@@ -58,6 +58,12 @@ Schema deciso dopo lo spike: **vettori + BM25 + RRF (+ rerank)**, niente soglie
 passaggi più pertinenti, filtrabili per Papa/tipologia/periodo. **Le prime
 domande del progetto trovano risposta sui dati** (es. "chi parla di 'casa
 comune' e quando?" — che il conteggio di parole chiave non sapeva cogliere).
+
+> ✅ **Prototipo già funzionante** in `prove/cerca_passaggi.py`: ibrido
+> vettori + BM25 + RRF su un campione, query → top passaggi con provenienza.
+> Conferma lo schema (il solo BM25 perde "custodire il creato"; i vettori lo
+> trovano; l'ibrido fa emergere il consenso). Resta da portarlo in `vdb.py` con
+> indice persistente, filtri sui metadati e reranking.
 
 ## Stadio 4 — Risposta RAG (`ask`) — opzionale
 
