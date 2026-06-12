@@ -59,11 +59,12 @@ passaggi più pertinenti, filtrabili per Papa/tipologia/periodo. **Le prime
 domande del progetto trovano risposta sui dati** (es. "chi parla di 'casa
 comune' e quando?" — che il conteggio di parole chiave non sapeva cogliere).
 
-> ✅ **Prototipo già funzionante** in `prove/cerca_passaggi.py`: ibrido
-> vettori + BM25 + RRF su un campione, query → top passaggi con provenienza.
-> Conferma lo schema (il solo BM25 perde "custodire il creato"; i vettori lo
-> trovano; l'ibrido fa emergere il consenso). Resta da portarlo in `vdb.py` con
-> indice persistente, filtri sui metadati e reranking.
+> ✅ **Implementato in [`../vdb.py`](../vdb.py)** (prima versione): `documenti`,
+> `pezzi`, `Embedder`, `Indice` (build/salva/carica), `costruisci`, `cerca`
+> (ibrido vettori + BM25 + RRF) e CLI `build`/`search` con filtri Papa/tipologia.
+> L'indice è persistente in `indice/`. L'esperimento `prove/cerca_passaggi.py`
+> resta come banco di prova. **Restano:** chunking strutturale per tipologia
+> ([mappa-tipologie](mappa-tipologie.md)), reranking, `build` incrementale.
 
 ## Stadio 4 — Risposta RAG (`ask`) — opzionale
 

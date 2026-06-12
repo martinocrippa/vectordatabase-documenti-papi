@@ -72,5 +72,15 @@ In [`doc/`](doc/):
 
 ## Stato
 
-Scaffold iniziale: documentazione di disegno pronta (vedi `doc/`). Il codice
-(chunking, embeddings, indice, ricerca) è in sviluppo, seguendo il piano.
+Prima versione funzionante in [`vdb.py`](vdb.py): `build` costruisce l'indice
+(embeddings e5 + BM25, salvato in `indice/`) e `search` fa la **ricerca ibrida**
+(vettori + BM25 fusi con RRF) con filtri per Papa/tipologia.
+
+```bash
+pip install -r requirements.txt
+python vdb.py build --per-papa 50          # indice da un campione (prova veloce)
+python vdb.py search "custodire il creato" --papa francesco
+```
+
+Da fare (vedi piano): chunking strutturale per tipologia, reranking, `build`
+incrementale sull'intero corpus.
