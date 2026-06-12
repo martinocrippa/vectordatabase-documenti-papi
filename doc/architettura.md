@@ -27,14 +27,14 @@ ingestion si regge sui suoi:
 | `documenti(data_dir)` | generatore: scorre `data/**.md`, separa frontmatter e corpo, restituisce un dict per documento. |
 | `pezzi(documento)` | spezza il corpo in **chunk** seguendo la struttura della tipologia (sezioni numerate/separatori/paragrafi) con overlap solo *dentro* la sezione, portandosi dietro i metadati. Ricetta per tipo in [`mappa-tipologie.md`](mappa-tipologie.md). |
 | `Embedder` | incapsula il modello locale di embedding; `encode(testi) -> matrice di vettori` (normalizzati). |
-| `Indice` | tiene i vettori (matrice NumPy) + i metadati paralleli; `aggiungi`, `salva`, `carica`, `cerca(vettore, k)`. |
+| `Indice` | tiene i vettori (matrice NumPy) **e** un indice BM25 sui testi dei chunk, con i metadati paralleli; `aggiungi`, `salva`, `carica`, e i due retriever `per_vettore(q, k)` / `per_keyword(q, k)`. |
 
 E due funzioni di orchestrazione che le mettono in fila:
 
 | Funzione | Cosa fa |
 |---|---|
 | `costruisci(data_dir)` | `documenti → pezzi → Embedder.encode → Indice.salva`. Costruisce l'indice da zero (o in modo incrementale, vedi sotto). |
-| `cerca(query, k)` | carica l'indice, `Embedder.encode([query])`, `Indice.cerca`, restituisce i chunk migliori con i metadati. |
+| `cerca(query, k)` | **ricerca ibrida**: unisce i risultati vettoriali e BM25 dell'`Indice` con RRF, applica i filtri sui metadati, opzionalmente fa il reranking, e restituisce i chunk migliori. Dettaglio sotto. |
 
 Si legge dall'alto in basso come una ricetta. Niente classi oltre alle due
 necessarie (`Embedder`, `Indice`, che incapsulano stato reale: il modello e la
@@ -48,50 +48,84 @@ La scelta più semplice che regge il volume del corpus (vedi
 ```
 indice/
   vettori.npy     # matrice float32 (N_chunk × dim), vettori L2-normalizzati
+  bm25.pkl        # indice BM25 sui testi dei chunk (lessico + statistiche)
   meta.jsonl      # una riga JSON per chunk, nello stesso ordine della matrice
 ```
 
 - **Vettori** → un singolo array NumPy `float32`. Normalizzati a norma 1, così
   la similarità coseno è un semplice prodotto scalare.
+- **BM25** → indice testuale sui chunk per la ricerca a parole chiave (forte sui
+  termini esatti e i nomi propri). Locale, niente server.
 - **Metadati** → `meta.jsonl`, una riga per chunk: `papa`, `tipologia`, `data`,
-  `titolo`, `url`, indice del documento, e il **testo del chunk** (serve a
-  mostrare il risultato e a costruire il contesto per il RAG).
-- **Ricerca** → `vettori @ query` (un solo prodotto matrice-vettore), poi i `k`
-  punteggi più alti con `numpy.argpartition`. Su qualche centinaio di migliaia
-  di chunk a 384 dimensioni sono **decine di millisecondi** in RAM.
+  `titolo`, `url`, indice del documento, e il **testo del chunk** (serve al BM25,
+  a mostrare il risultato e a costruire il contesto per il RAG).
 
-> ⚠️ **`meta.jsonl` contiene spezzoni dei testi originali**, quindi è
-> **materiale sotto copyright**: l'intera cartella `indice/` è in `.gitignore`,
-> esattamente come `data/`. Si rigenera in locale. Non si versiona, non si
+> ⚠️ **`meta.jsonl` (e l'indice BM25) contengono spezzoni dei testi originali**,
+> quindi è **materiale sotto copyright**: l'intera cartella `indice/` è in
+> `.gitignore`, come `data/`. Si rigenera in locale. Non si versiona, non si
 > pubblica.
 
-### Perché NON un database vettoriale esterno (per ora)
+### Perché NON un database esterno (per ora)
 
 Niente FAISS, niente Chroma/Qdrant/pgvector, niente server. Il brute-force con
-NumPy è sufficiente per questo volume e ha un costo cognitivo vicino a zero: un
-file, una matrice, un prodotto. Un indice approssimato (es. `hnswlib` o `faiss`)
-si aggiunge **solo quando la ricerca lineare diventa lenta davvero** — e a quel
-punto sarà un cambiamento isolato dietro `Indice.cerca`, non una riscrittura.
-"Aggiungi complessità quando ti fa male, non prima."
+NumPy regge questo volume e ha un costo cognitivo vicino a zero: un file, una
+matrice, un prodotto. Anche l'ibrido si fa in locale (BM25 con una libreria
+leggera + RRF in poche righe). Un indice approssimato (`hnswlib`/`faiss`) si
+aggiunge **solo quando la ricerca lineare diventa lenta davvero** — cambiamento
+isolato dietro `Indice`, non una riscrittura.
+
+**MongoDB Atlas** è l'alternativa *gestita* naturale: fa già ibrido nativo —
+full-text **BM25** (Lucene) + **Vector Search**, fusi con **`$rankFusion`** (RRF)
+— e regge la scala senza scriverselo. Lo terremo presente come passo di crescita,
+con un'avvertenza: è un servizio cloud, quindi i testi (© LEV) **uscirebbero
+dalla macchina**. Per la fase personale/di studio restiamo **local-first**;
+Atlas diventa interessante se/quando serve esporre il servizio a più persone.
+
+## Ricerca ibrida (vettori + BM25 + reranking)
+
+Lezione di uno **spike** iniziale (vedi `prove/ambiente_semantico.py` e
+l'aggiornamento in `risultati-preliminari.md` nel repo di ingestion): i due
+metodi non vanno messi *uno contro l'altro*, ma **insieme**. Da soli:
+
+- i **vettori** colgono il significato (`casa comune` ≈ `ambiente`) ma sono
+  sfocati e le loro similarità **non sono calibrate** (nessuna soglia "naturale");
+- **BM25** è preciso sui termini esatti e i nomi propri, ma cieco ai sinonimi.
+
+La pipeline di `cerca(query, k)`:
+
+1. **Due retriever in parallelo** sull'`Indice`: top-N per **vettore** (coseno) e
+   top-N per **keyword** (BM25).
+2. **Fusione con Reciprocal Rank Fusion (RRF)**: si combinano i due *ranking*
+   (non i punteggi grezzi, così si evita di dover calibrare scale diverse).
+   Poche righe, nessuna soglia.
+3. **Filtri sui metadati** (`papa`, `tipologia`, date) sul set fuso.
+4. **Reranking (opzionale)** dei primi ~50 con un **cross-encoder** che rilegge
+   coppia (query, chunk) e riordina: è il passo che alza di più la qualità.
+
+Nessuna classificazione per soglia: si lavora sempre con **ranking e top-k**,
+che è robusto. È lo stesso schema della ricerca ibrida di MongoDB Atlas, fatto
+in locale.
 
 ## Il modello di embedding
 
 - **Locale, multilingue, nessuna API.** I testi non escono dalla macchina:
   questo evita sia i costi sia ogni dubbio sul mandare materiale protetto a
   servizi terzi. Tutto gira in casa.
-- **Default proposto:** `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-  (384 dim, veloce, gestisce bene l'italiano, nessun prefisso da ricordare).
-- **Upgrade qualità drop-in:** `intfloat/multilingual-e5-base` (768 dim, migliore
-  nel retrieval; richiede i prefissi `query:` / `passage:`). Il modello è una
-  **singola costante** in cima al modulo: cambiarlo è una riga.
+- **Default:** `intfloat/multilingual-e5-base` (768 dim), modello da *retrieval*
+  (richiede i prefissi `query:` / `passage:`). Lo spike ha mostrato che un
+  modello da parafrasi/STS (`paraphrase-multilingual-MiniLM`) confonde temi
+  vicini; per la ricerca serve un modello tarato sul retrieval.
+- **Reranker:** un cross-encoder multilingue (es. `mmarco-mMiniLMv2`) per il
+  passo 4. Anch'esso locale.
+- Modello e reranker sono **costanti in cima al modulo**: cambiarli è una riga.
 
 ## Interfaccia (CLI)
 
 Una sola riga di comando, tre verbi, sullo stile di `python papi.py`:
 
 ```bash
-python -m vdb build                  # costruisce indice/ da data/
-python -m vdb search "cosa dice il Papa sulla pace?"      # ricerca semantica
+python -m vdb build                  # costruisce indice/ (vettori + BM25) da data/
+python -m vdb search "cosa dice il Papa sulla pace?"      # ricerca ibrida + rerank
 python -m vdb search "..." --papa francesco --tipo angelus  # con filtri sui metadati
 python -m vdb ask "..."              # (stadio successivo, opzionale) risposta RAG
 ```
@@ -118,12 +152,14 @@ setup/environment.yml
 
 | Pacchetto | Perché |
 |---|---|
-| `sentence-transformers` | il modello locale di embedding (porta con sé `torch`, `transformers`). È l'unica dipendenza pesante, ed è inevitabile per fare embedding in locale. |
-| `numpy` | la matrice dei vettori e la ricerca. |
+| `sentence-transformers` | embedding **e** cross-encoder per il reranking, in locale (porta con sé `torch`, `transformers`). L'unica dipendenza pesante, inevitabile per lavorare in casa. |
+| `numpy` | la matrice dei vettori e la ricerca per coseno. |
+| `rank-bm25` | l'indice BM25 per la parte a keyword (libreria piccola, pura Python). |
 
-`build` e `search` non chiedono altro. Lo stadio opzionale `ask` (RAG) aggiunge
-un client LLM (es. `anthropic`) usato con **chiave/account personale**; vedi le
-note di copyright nel piano. Python ≥ 3.9 (consigliato 3.12), come l'ingestion.
+La fusione RRF è poche righe, nessuna libreria. `build` e `search` non chiedono
+altro. Lo stadio opzionale `ask` (RAG) aggiunge un client LLM (es. `anthropic`)
+usato con **chiave/account personale**; vedi le note di copyright nel piano.
+Python ≥ 3.9 (consigliato 3.12), come l'ingestion.
 
 ## Stile del codice
 

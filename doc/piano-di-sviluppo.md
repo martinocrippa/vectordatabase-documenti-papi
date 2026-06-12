@@ -41,13 +41,17 @@ modello ancora: si verifica solo che il testo entri e si spezzi bene.
 **Risultato:** `python -m vdb build` produce `indice/` dall'intero corpus.
 Da fare a batch per non saturare la RAM; misurare tempi e dimensioni reali.
 
-## Stadio 3 — Ricerca semantica (`cerca` + CLI) 🎯
+## Stadio 3 — Ricerca ibrida (`cerca` + CLI) 🎯
 
-- [ ] `Indice.cerca(vettore, k)`: prodotto matrice-vettore + top-k con
+Schema deciso dopo lo spike: **vettori + BM25 + RRF (+ rerank)**, niente soglie
+(vedi [architettura](architettura.md#ricerca-ibrida-vettori--bm25--reranking)).
+
+- [ ] `Indice.per_vettore(q, k)`: coseno (prodotto matrice-vettore) + top-k con
   `numpy.argpartition`.
-- [ ] `cerca(query, k, filtri)`: carica indice, embedda la query, applica i
-  **filtri per metadato** (`--papa`, `--tipo`, intervallo di date), restituisce i
-  chunk migliori con punteggio, titolo e `url`.
+- [ ] `Indice.per_keyword(q, k)`: BM25 sui testi dei chunk (`rank-bm25`).
+- [ ] `cerca(query, k, filtri)`: fonde i due ranking con **RRF**, applica i
+  **filtri per metadato** (`--papa`, `--tipo`, date), opzionale **rerank** con
+  cross-encoder, restituisce i chunk con titolo e `url`.
 - [ ] CLI `python -m vdb search "..."` con i filtri.
 
 **Risultato e traguardo della v1:** si fa una domanda al corpus e si ottengono i
