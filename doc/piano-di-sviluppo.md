@@ -10,7 +10,7 @@ sono quelle descritte in [`architettura.md`](architettura.md).
 - [x] `doc/` con sintesi del corpus, architettura e questo piano.
 - [x] `.gitignore` che esclude `data/`, `resources/`, `indice/`.
 - [x] `requirements.txt` (`sentence-transformers`, `numpy`, `rank-bm25`).
-- [ ] `setup/environment.yml`, sullo stile del repo di ingestion.
+- [x] `setup/environment.yml`, sullo stile del repo di ingestion.
 
 **Risultato:** l'ambiente si installa e la direzione è scritta.
 
