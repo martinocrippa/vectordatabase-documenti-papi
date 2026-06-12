@@ -157,3 +157,10 @@ Questa mappa alimenta lo **Stadio 1** del piano (la primitiva `pezzi`): invece d
 un chunking unico, `pezzi(documento)` riconosce le sezioni e applica la ricetta
 della sua tipologia. Resta KISS: poche regole, una funzione, nessuna dipendenza
 nuova — solo qualche regex sui marcatori qui sopra.
+
+> **Stato (misura interim).** `vdb.py` non fa ancora il chunking strutturale:
+> spezza a finestra fissa. Il rumore multilingue è però già attenuato per altra
+> via — ogni chunk ha la **lingua** e i saluti tradotti (in lingua diversa dal
+> documento) sono **esclusi di default** dalla ricerca. Restano da togliere, col
+> chunking strutturale, l'**intestazione** in testa e i saluti **italiani**
+> ("Dopo l'Angelus") che la lingua da sola non distingue dal corpo.

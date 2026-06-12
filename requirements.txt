@@ -1,5 +1,6 @@
 # Vector database — embedding + ricerca ibrida. Vedi doc/architettura.md.
 # Python >= 3.9 (consigliato 3.12).
-sentence-transformers>=2.2   # embedding e cross-encoder reranker (porta torch, transformers)
+sentence-transformers>=2.2   # embedding e5 (porta torch, transformers); base anche per il futuro reranker
 numpy>=1.24                  # matrice dei vettori e ricerca per coseno
 rank-bm25>=0.2               # BM25 per la parte keyword della ricerca ibrida
+py3langid>=0.3               # riconoscimento lingua dei chunk (isola i saluti tradotti)

@@ -6,24 +6,50 @@ Un solo file, poche primitive (vedi doc/architettura.md):
 La ricerca e' IBRIDA: vettori (significato) + BM25 (parole) fusi con RRF,
 senza soglie. L'indice si costruisce una volta e si salva in indice/.
 
+In piu':
+  - ogni chunk e' etichettato con la lingua; i saluti tradotti in altra lingua
+    (i "doppioni") sono marcati escludibili e tenuti fuori dalla ricerca di
+    default (vedi --lingua / --tutto);
+  - i risultati sono deduplicati per documento (un solo chunk, il migliore);
+  - i pesi del modello stanno in models/ dentro il repo (HF_HOME), non nella
+    cache utente.
+
 Uso:
     python vdb.py build                         # costruisce indice/ da data/
     python vdb.py build --per-papa 50           # campione (per provare)
     python vdb.py search "cosa dice sulla pace?"
     python vdb.py search "..." --papa francesco --tipo angelus -k 8
+    python vdb.py search "..." --lingua it       # solo chunk italiani
+    python vdb.py search "..." --tutto           # includi i saluti tradotti
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import json
+import os
 import pathlib
 import pickle
 import re
+import sys
 
 import numpy as np
+import py3langid as langid
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
+
+# Lingue attese nel corpus (corpi + saluti). Restringere migliora l'accuratezza
+# del riconoscimento su testi brevi.
+langid.set_languages(["it", "en", "fr", "es", "de", "pt", "pl"])
+
+ROOT = pathlib.Path(__file__).resolve().parent   # data/, indice/, models/ stanno qui
+
+# I pesi del modello vivono in models/ dentro il repo (gitignored), non nella
+# cache utente. HF_HOME va impostato PRIMA di importare sentence_transformers.
+# setdefault: se l'utente ha gia' un HF_HOME suo, lo rispettiamo.
+os.environ.setdefault("HF_HOME", str(ROOT / "models"))
+
+from sentence_transformers import SentenceTransformer  # noqa: E402
 
 MODELLO = "intfloat/multilingual-e5-base"   # modello da retrieval (vedi review)
 PREF_Q, PREF_P = "query: ", "passage: "     # e5 vuole questi prefissi
@@ -81,6 +107,22 @@ def pezzi(corpo: str, n: int = PAROLE_CHUNK) -> list[str]:
 def _tok(s: str) -> list[str]:
     """Tokenizzazione semplice per BM25 (parole di >2 lettere, minuscole)."""
     return [w for w in re.findall(r"[a-zàèéìòóù]+", s.lower()) if len(w) > 2]
+
+
+def _lingua(testo: str) -> str:
+    """Lingua del testo (codice ISO) o 'und' se troppo corto per decidere."""
+    t = testo.strip()
+    return langid.classify(t)[0] if len(t) >= 20 else "und"
+
+
+def _prevalente(chunks: list[str], lingue: list[str]) -> str:
+    """Lingua prevalente di un documento: quella con più parole (priorità al
+    grosso del testo → di norma l'italiano del corpo, non i saluti)."""
+    peso: collections.Counter = collections.Counter()
+    for testo, lg in zip(chunks, lingue):
+        peso[lg] += len(testo.split())
+    peso.pop("und", None)
+    return peso.most_common(1)[0][0] if peso else "und"
 
 
 class Embedder:
@@ -145,8 +187,15 @@ def costruisci(data_dir="data", out="indice", per_papa=None) -> Indice:
     emb = Embedder()
     meta = []
     for doc in documenti(data_dir, per_papa):
-        for i, pz in enumerate(pezzi(doc["corpo"])):
-            meta.append({c: doc[c] for c in CAMPI} | {"testo": pz, "i": i})
+        chs = pezzi(doc["corpo"])
+        lingue = [_lingua(t) for t in chs]
+        lingua_doc = _prevalente(chs, lingue)   # flag lingua prevalente del documento
+        for i, (pz, lg) in enumerate(zip(chs, lingue)):
+            # un chunk in lingua diversa dal documento e' un "doppione" (saluto
+            # tradotto): lo teniamo ma marchiamo escludibile dalla ricerca.
+            meta.append({c: doc[c] for c in CAMPI} | {
+                "testo": pz, "i": i, "lingua": lg, "lingua_doc": lingua_doc,
+                "escludibile": lg != lingua_doc and lg != "und"})
     print(f"{len(meta)} chunk. Calcolo embedding (modello {MODELLO})...")
     vettori = emb.passaggi([m["testo"] for m in meta]).astype("float32")
     bm25 = BM25Okapi([_tok(m["testo"]) for m in meta])
@@ -156,20 +205,32 @@ def costruisci(data_dir="data", out="indice", per_papa=None) -> Indice:
     return idx
 
 
-def cerca(query: str, k=5, papa=None, tipo=None, out="indice",
-          n=N_CANDIDATI) -> list[dict]:
-    """Ricerca ibrida: vettori + BM25 fusi con RRF, poi filtri sui metadati."""
+def cerca(query: str, k=5, papa=None, tipo=None, lingua=None, tutto=False,
+          out="indice", n=N_CANDIDATI) -> list[dict]:
+    """Ricerca ibrida: vettori + BM25 fusi con RRF, poi filtri sui metadati.
+
+    Di default esclude i chunk "escludibili" (saluti tradotti in altra lingua):
+    `tutto=True` li reinclude. `lingua` filtra su una lingua specifica.
+    """
     emb = Embedder()
     idx = Indice.carica(out)
     fusi = _rrf(idx.per_vettore(emb.query(query), n),
                 idx.per_keyword(_tok(query), n))
-    risultati = []
+    risultati, visti = [], set()
     for i in sorted(fusi, key=lambda j: -fusi[j]):
         m = idx.meta[i]
+        if not tutto and m.get("escludibile"):
+            continue
+        if lingua and m.get("lingua") != lingua:
+            continue
         if papa and m["papa"].lower().find(papa.lower()) < 0:
             continue
         if tipo and m["tipologia"] != tipo:
             continue
+        doc = m.get("url") or m.get("titolo")   # un solo (il migliore) chunk per documento
+        if doc in visti:
+            continue
+        visti.add(doc)
         risultati.append(m)
         if len(risultati) >= k:
             break
@@ -179,12 +240,15 @@ def cerca(query: str, k=5, papa=None, tipo=None, out="indice",
 # --- CLI ---------------------------------------------------------------------
 
 def main() -> int:
+    # La console Windows (cp1252) non stampa certi caratteri (titoli con accenti
+    # o lettere straniere): forziamo UTF-8 per non far crashare la stampa.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="vector database dei documenti dei Papi")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="costruisce l'indice da data/")
-    b.add_argument("--data", default="data")
-    b.add_argument("--out", default="indice")
+    b.add_argument("--data", default=str(ROOT / "data"))
+    b.add_argument("--out", default=str(ROOT / "indice"))
     b.add_argument("--per-papa", type=int, default=None,
                    help="campiona N documenti per Papa (per prove veloci)")
 
@@ -193,14 +257,18 @@ def main() -> int:
     s.add_argument("-k", type=int, default=5)
     s.add_argument("--papa", default=None)
     s.add_argument("--tipo", default=None)
-    s.add_argument("--out", default="indice")
+    s.add_argument("--lingua", default=None, help="filtra i chunk per lingua (es. it)")
+    s.add_argument("--tutto", action="store_true",
+                   help="includi anche i chunk escludibili (saluti tradotti)")
+    s.add_argument("--out", default=str(ROOT / "indice"))
 
     a = ap.parse_args()
     if a.cmd == "build":
         costruisci(a.data, a.out, a.per_papa)
     elif a.cmd == "search":
-        for r, m in enumerate(cerca(a.query, a.k, a.papa, a.tipo, a.out), 1):
-            print(f"{r}. {m['papa']} · {m['tipologia']} · {m['data']}")
+        for r, m in enumerate(cerca(a.query, a.k, a.papa, a.tipo,
+                                    a.lingua, a.tutto, a.out), 1):
+            print(f"{r}. {m['papa']} · {m['tipologia']} · {m['data']} · [{m.get('lingua', '?')}]")
             print(f"   {m['titolo']}")
             print(f"   …{m['testo'][:160].strip()}…")
             print(f"   {m['url']}")

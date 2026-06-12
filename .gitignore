@@ -13,3 +13,7 @@ resources/
 # Indice vettoriale generato: rigenerabile e contiene spezzoni dei testi
 # (materiale sotto copyright). Locale, non versionato.
 indice/
+
+# Pesi del modello di embedding (cache Hugging Face, HF_HOME). Scaricati a
+# richiesta, ~centinaia di MB. Locali, non versionati.
+models/

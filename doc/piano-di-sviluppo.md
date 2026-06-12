@@ -16,55 +16,55 @@ sono quelle descritte in [`architettura.md`](architettura.md).
 
 ## Stadio 1 — Leggere e spezzare (`documenti`, `pezzi`)
 
-- [ ] `documenti(data_dir)`: scorre `data/**.md`, separa frontmatter YAML e
-  corpo, restituisce un dict per documento (parsing del frontmatter a mano, è
-  banale: niente nuove dipendenze).
-- [ ] `pezzi(documento)`: chunking **ibrido struttura+overlap** secondo la
-  [mappa delle tipologie](mappa-tipologie.md) — taglia prima sui confini
-  strutturali (sezioni numerate, separatori, coda multilingua), impacchetta fino
-  a ~200–400 parole, overlap solo dentro la stessa sezione; propaga i metadati e
-  l'etichetta di sezione a ogni chunk.
+- [x] `documenti(data_dir)`: scorre `data/**.md`, separa frontmatter YAML e
+  corpo, restituisce un dict per documento (parsing a mano, niente dipendenze).
+- [~] `pezzi(documento)`: per ora chunking **semplice** a finestra di ~180
+  parole. Come misura interim contro il rumore multilingue, ogni chunk è
+  **etichettato con la lingua** e i saluti tradotti sono marcati escludibili.
+  **Resta** il chunking **strutturale** per tipologia (sezioni numerate,
+  separatori, coda saluti) della [mappa](mappa-tipologie.md), che toglierà anche
+  l'intestazione e i saluti *italiani*.
 - [ ] Test sull'`esempio/` (e, se presente, su `data/`).
 
-**Risultato:** da `data/` si ottiene un flusso di chunk con metadati. Nessun
-modello ancora: si verifica solo che il testo entri e si spezzi bene.
+**Risultato:** da `data/` si ottiene un flusso di chunk con metadati (compresa la
+lingua). Il chunking strutturale è il prossimo affinamento di qualità.
 
 ## Stadio 2 — Embeddings e indice (`Embedder`, `Indice`, `costruisci`)
 
-- [ ] `Embedder`: carica il modello locale (costante in cima al file),
-  `encode(testi)` → matrice `float32` normalizzata.
-- [ ] `Indice`: `aggiungi(vettori, meta)`, `salva()` → `indice/vettori.npy` +
-  `indice/meta.jsonl`, `carica()`.
-- [ ] `costruisci(data_dir)`: orchestrazione `documenti → pezzi → encode → salva`,
-  a batch, con un minimo di progress a video.
+- [x] `Embedder`: carica il modello locale (e5, costante in cima al file),
+  `passaggi`/`query` → matrice `float32` normalizzata.
+- [x] `Indice`: `salva()` → `indice/vettori.npy` + `bm25.pkl` + `meta.jsonl`,
+  `carica()`, `per_vettore`/`per_keyword`.
+- [x] `costruisci(data_dir)`: `documenti → pezzi → encode + BM25 → salva`, con
+  progress a video.
 
-**Risultato:** `python -m vdb build` produce `indice/` dall'intero corpus.
-Da fare a batch per non saturare la RAM; misurare tempi e dimensioni reali.
+**Risultato:** `python vdb.py build` produce `indice/`; `--per-papa N` campiona
+per le prove. Sull'intero corpus richiede tempo (CPU); misurato sui campioni.
 
 ## Stadio 3 — Ricerca ibrida (`cerca` + CLI) 🎯
 
 Schema deciso dopo l'esperimento: **vettori + BM25 + RRF (+ rerank)**, niente soglie
 (vedi [architettura](architettura.md#ricerca-ibrida-vettori--bm25--reranking)).
 
-- [ ] `Indice.per_vettore(q, k)`: coseno (prodotto matrice-vettore) + top-k con
-  `numpy.argpartition`.
-- [ ] `Indice.per_keyword(q, k)`: BM25 sui testi dei chunk (`rank-bm25`).
-- [ ] `cerca(query, k, filtri)`: fonde i due ranking con **RRF**, applica i
-  **filtri per metadato** (`--papa`, `--tipo`, date), opzionale **rerank** con
-  cross-encoder, restituisce i chunk con titolo e `url`.
-- [ ] CLI `python -m vdb search "..."` con i filtri.
+- [x] `Indice.per_vettore(q, k)`: coseno (prodotto matrice-vettore) + top-k.
+- [x] `Indice.per_keyword(q, k)`: BM25 sui testi dei chunk (`rank-bm25`).
+- [x] `cerca(query, k, filtri)`: fonde i due ranking con **RRF**, esclude i
+  saluti tradotti, filtri `--papa`/`--tipo`/`--lingua`, **dedup per documento**,
+  restituisce i chunk con titolo e `url`.
+- [x] CLI `python vdb.py search "..."` con i filtri.
+- [ ] **Rerank** con cross-encoder (il passo che alza di più la qualità).
 
 **Risultato e traguardo della v1:** si fa una domanda al corpus e si ottengono i
 passaggi più pertinenti, filtrabili per Papa/tipologia/periodo. **Le prime
 domande del progetto trovano risposta sui dati** (es. "chi parla di 'casa
 comune' e quando?" — che il conteggio di parole chiave non sapeva cogliere).
 
-> ✅ **Implementato in [`../vdb.py`](../vdb.py)** (prima versione): `documenti`,
-> `pezzi`, `Embedder`, `Indice` (build/salva/carica), `costruisci`, `cerca`
-> (ibrido vettori + BM25 + RRF) e CLI `build`/`search` con filtri Papa/tipologia.
-> L'indice è persistente in `indice/`. L'esperimento `prove/cerca_passaggi.py`
-> resta come banco di prova. **Restano:** chunking strutturale per tipologia
-> ([mappa-tipologie](mappa-tipologie.md)), reranking, `build` incrementale.
+> ✅ **Implementato in [`../vdb.py`](../vdb.py)**: indice persistente (vettori +
+> BM25 + meta) e ricerca **ibrida** con RRF, etichetta di **lingua** per chunk
+> (saluti tradotti esclusi di default), **dedup per documento**, filtri
+> Papa/tipologia/lingua, CLI `build`/`search`. **Restano:** chunking strutturale
+> per tipologia ([mappa-tipologie](mappa-tipologie.md)) per togliere intestazioni
+> e saluti italiani, **reranking** col cross-encoder, `build` incrementale.
 
 ## Stadio 4 — Risposta RAG (`ask`) — opzionale
 
@@ -93,7 +93,8 @@ arricchisci(nome, fn)   # applica fn a ogni documento e scrive i campi in meta.j
 ```
 
 I confronti tra Papi e nel tempo nascono poi **filtrando e raggruppando** su
-questi campi, esattamente come i filtri `--papa/--tipo` della ricerca.
+questi campi, esattamente come i filtri `--papa/--tipo` della ricerca. Il primo
+arricchimento — la **lingua** del chunk — è già in `vdb.py` (vedi Stadio 1).
 
 - [ ] **5a — Topic modeling.** Raggruppa i documenti per tema *emergente* (non
   per parole chiave fissate a mano: era il limite del `check_dati.py`

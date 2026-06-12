@@ -57,8 +57,10 @@ indice/
 - **BM25** → indice testuale sui chunk per la ricerca a parole chiave (forte sui
   termini esatti e i nomi propri). Locale, niente server.
 - **Metadati** → `meta.jsonl`, una riga per chunk: `papa`, `tipologia`, `data`,
-  `titolo`, `url`, indice del documento, e il **testo del chunk** (serve al BM25,
-  a mostrare il risultato e a costruire il contesto per il RAG).
+  `titolo`, `url`, indice del chunk, il **testo** (serve al BM25 e a mostrare il
+  risultato), più tre campi di lingua: `lingua` (del chunk), `lingua_doc`
+  (prevalente del documento) ed `escludibile` (chunk in lingua diversa dal
+  documento = saluto tradotto, fuori dalla ricerca di default).
 
 > ⚠️ **`meta.jsonl` (e l'indice BM25) contengono spezzoni dei testi originali**,
 > quindi è **materiale sotto copyright**: l'intera cartella `indice/` è in
@@ -91,16 +93,20 @@ metodi non vanno messi *uno contro l'altro*, ma **insieme**. Da soli:
   sfocati e le loro similarità **non sono calibrate** (nessuna soglia "naturale");
 - **BM25** è preciso sui termini esatti e i nomi propri, ma cieco ai sinonimi.
 
-La pipeline di `cerca(query, k)`:
+La pipeline di `cerca(query, k)` — implementata in `vdb.py`:
 
 1. **Due retriever in parallelo** sull'`Indice`: top-N per **vettore** (coseno) e
    top-N per **keyword** (BM25).
 2. **Fusione con Reciprocal Rank Fusion (RRF)**: si combinano i due *ranking*
    (non i punteggi grezzi, così si evita di dover calibrare scale diverse).
    Poche righe, nessuna soglia.
-3. **Filtri sui metadati** (`papa`, `tipologia`, date) sul set fuso.
-4. **Reranking (opzionale)** dei primi ~50 con un **cross-encoder** che rilegge
-   coppia (query, chunk) e riordina: è il passo che alza di più la qualità.
+3. **Filtri sui metadati**: esclusi di default i chunk `escludibile` (saluti
+   tradotti); poi `papa`, `tipologia`, `lingua` (`--tutto` reinclude tutto).
+4. **Deduplica per documento**: un solo chunk (il migliore) per documento, così
+   il top-k spazia su documenti diversi.
+5. **Reranking (da fare, opzionale)** dei primi ~50 con un **cross-encoder** che
+   rilegge la coppia (query, chunk) e riordina: il passo che alza di più la
+   qualità. Non ancora implementato.
 
 Nessuna classificazione per soglia: si lavora sempre con **ranking e top-k**,
 che è robusto. È lo stesso schema della ricerca ibrida di MongoDB Atlas, fatto
@@ -115,25 +121,32 @@ in locale.
   (richiede i prefissi `query:` / `passage:`). L'esperimento ha mostrato che un
   modello da parafrasi/STS (`paraphrase-multilingual-MiniLM`) confonde temi
   vicini; per la ricerca serve un modello tarato sul retrieval.
-- **Reranker:** un cross-encoder multilingue (es. `mmarco-mMiniLMv2`) per il
-  passo 4. Anch'esso locale.
-- Modello e reranker sono **costanti in cima al modulo**: cambiarli è una riga.
+- **Pesi in locale, dentro il repo.** `vdb.py` imposta `HF_HOME` su `models/`
+  (gitignored): il modello si scarica una volta lì, niente cache utente. Vedi
+  [setup/README.md](../setup/README.md).
+- **Lingua dei chunk:** rilevata con `py3langid` (leggero, locale), usata per
+  marcare i saluti tradotti come escludibili.
+- **Reranker (da fare):** un cross-encoder multilingue (es. `mmarco-mMiniLMv2`)
+  per il passo 5. Anch'esso locale.
+- Le scelte (modello, taglia chunk, `k`) sono **costanti in cima al modulo**:
+  cambiarle è una riga.
 
 ## Interfaccia (CLI)
 
-Una sola riga di comando, tre verbi, sullo stile di `python papi.py`:
+Una sola riga di comando, sullo stile di `python papi.py`:
 
 ```bash
-python -m vdb build                  # costruisce indice/ (vettori + BM25) da data/
-python -m vdb search "cosa dice il Papa sulla pace?"      # ricerca ibrida + rerank
-python -m vdb search "..." --papa francesco --tipo angelus  # con filtri sui metadati
-python -m vdb ask "..."              # (stadio successivo, opzionale) risposta RAG
+python vdb.py build                  # costruisce indice/ (vettori + BM25) da data/
+python vdb.py build --per-papa 50    # campione, per prove veloci
+python vdb.py search "cosa dice il Papa sulla pace?"        # ricerca ibrida
+python vdb.py search "..." --papa francesco --tipo angelus  # filtri sui metadati
+python vdb.py search "..." --lingua it    # solo italiano   --tutto  # anche i saluti
 ```
 
-I **filtri per metadato** (`--papa`, `--tipo`, intervallo di date) sono il modo
-con cui si fanno i confronti tra pontificati: si cerca lo stesso significato e
-si guarda chi lo dice, quando. Non serve altro per le prime domande del
-progetto.
+I **filtri per metadato** (`--papa`, `--tipo`, `--lingua`) sono il modo con cui
+si fanno i confronti tra pontificati: si cerca lo stesso significato e si guarda
+chi lo dice, quando, in che lingua. Un verbo `ask` (risposta RAG, con LLM) è uno
+stadio successivo opzionale, non ancora implementato.
 
 ## Layout del codice
 
@@ -141,12 +154,17 @@ Un solo modulo, come il repo di ingestion. Si divide solo se e quando cresce.
 
 ```
 vdb.py            # le primitive + la CLI (un file, struttura piatta)
+prove/            # esperimenti (versionati): hanno guidato le scelte di disegno
 indice/           # output rigenerabile, NON versionato (.gitignore)
-test/
-  smoke_test.py   # costruisce un mini-indice dall'esempio e fa una ricerca
+models/           # pesi del modello (HF_HOME), NON versionato (.gitignore)
 requirements.txt
 setup/environment.yml
 ```
+
+Gli **esperimenti** in `prove/` (es. `ambiente_semantico.py`,
+`cerca_passaggi.py`, `esperimento_sport.py`) restano come memoria del *perché*
+delle scelte (soglie, ibrido, lingua); non sono codice di produzione. Un
+`test/` con smoke test arriverà quando il modulo si stabilizza.
 
 ## Dipendenze (minime)
 
