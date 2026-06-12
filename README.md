@@ -77,10 +77,12 @@ Prima versione funzionante in [`vdb.py`](vdb.py): `build` costruisce l'indice
 (vettori + BM25 fusi con RRF) con filtri per Papa/tipologia.
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt            # oppure conda: vedi setup/README.md
 python vdb.py build --per-papa 50          # indice da un campione (prova veloce)
 python vdb.py search "custodire il creato" --papa francesco
 ```
+
+Dettagli sull'ambiente (conda/venv) in [setup/README.md](setup/README.md).
 
 Da fare (vedi piano): chunking strutturale per tipologia, reranking, `build`
 incrementale sull'intero corpus.
