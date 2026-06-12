@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spike: marcare i documenti che parlano di AMBIENTE con gli embedding,
+"""Esperimento: marcare i documenti che parlano di AMBIENTE con gli embedding,
 invece che con le regex su radici di parola (come faceva check_dati.py).
 
 Tesi da verificare: il significato batte le stringhe. Documenti che parlano di
@@ -42,7 +42,7 @@ def corpo(testo: str) -> str:
 
 
 def chunk(testo: str, n: int = PAROLE_CHUNK) -> list[str]:
-    """Spezza in finestre da ~n parole (spike: niente overlap)."""
+    """Spezza in finestre da ~n parole (esperimento: niente overlap)."""
     p = testo.split()
     return [" ".join(p[i:i + n]) for i in range(0, len(p), n)] or [""]
 

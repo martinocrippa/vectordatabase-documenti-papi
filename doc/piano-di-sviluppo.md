@@ -43,7 +43,7 @@ Da fare a batch per non saturare la RAM; misurare tempi e dimensioni reali.
 
 ## Stadio 3 — Ricerca ibrida (`cerca` + CLI) 🎯
 
-Schema deciso dopo lo spike: **vettori + BM25 + RRF (+ rerank)**, niente soglie
+Schema deciso dopo l'esperimento: **vettori + BM25 + RRF (+ rerank)**, niente soglie
 (vedi [architettura](architettura.md#ricerca-ibrida-vettori--bm25--reranking)).
 
 - [ ] `Indice.per_vettore(q, k)`: coseno (prodotto matrice-vettore) + top-k con

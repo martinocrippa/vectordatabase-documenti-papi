@@ -83,7 +83,7 @@ Atlas diventa interessante se/quando serve esporre il servizio a più persone.
 
 ## Ricerca ibrida (vettori + BM25 + reranking)
 
-Lezione di uno **spike** iniziale (vedi `prove/ambiente_semantico.py` e
+Lezione di un **esperimento** iniziale (vedi `prove/ambiente_semantico.py` e
 l'aggiornamento in `risultati-preliminari.md` nel repo di ingestion): i due
 metodi non vanno messi *uno contro l'altro*, ma **insieme**. Da soli:
 
@@ -112,7 +112,7 @@ in locale.
   questo evita sia i costi sia ogni dubbio sul mandare materiale protetto a
   servizi terzi. Tutto gira in casa.
 - **Default:** `intfloat/multilingual-e5-base` (768 dim), modello da *retrieval*
-  (richiede i prefissi `query:` / `passage:`). Lo spike ha mostrato che un
+  (richiede i prefissi `query:` / `passage:`). L'esperimento ha mostrato che un
   modello da parafrasi/STS (`paraphrase-multilingual-MiniLM`) confonde temi
   vicini; per la ricerca serve un modello tarato sul retrieval.
 - **Reranker:** un cross-encoder multilingue (es. `mmarco-mMiniLMv2`) per il

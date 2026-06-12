@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spike 2: ricerca IBRIDA per passaggi (vettori + BM25 + RRF).
+"""Esperimento 2: ricerca IBRIDA per passaggi (vettori + BM25 + RRF).
 
 E' il mini-prototipo dello Stadio 3 del piano, in un file: si costruisce un
 indice su un campione del corpus, poi si interroga e si confrontano i tre
