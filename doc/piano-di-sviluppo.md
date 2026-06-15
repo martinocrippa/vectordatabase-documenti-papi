@@ -36,10 +36,15 @@ lingua). Il chunking strutturale è il prossimo affinamento di qualità.
 - [x] `Indice`: `salva()` → `indice/vettori.npy` + `bm25.pkl` + `meta.jsonl`,
   `carica()`, `per_vettore`/`per_keyword`.
 - [x] `costruisci(data_dir)`: `documenti → pezzi → encode + BM25 → salva`, con
-  progress a video.
+  progress a video. **Resumabile**: cache embedding (`models/emb_*.pkl`) +
+  checkpoint chunk (`meta.prepared.jsonl`), così un build interrotto riprende.
 
 **Risultato:** `python vdb.py build` produce `indice/`; `--per-papa N` campiona
-per le prove. Sull'intero corpus richiede tempo (CPU); misurato sui campioni.
+per le prove. Sull'intero corpus richiede **ore su CPU**: il build completo è
+stato fatto a rilanci (resumabile); finora indicizzato **~83% del corpus**
+(~147k chunk su ~175k). ⚠️ Lezione: la persistenza fatta a mano (cache da
+~450 MB ricaricata ogni volta, checkpoint) è fragile a questa scala → è il caso
+per cui si passa a **LanceDB** (vedi Stadio 6 e [`scelta-store.md`](scelta-store.md)).
 
 ## Stadio 3 — Ricerca ibrida (`cerca` + CLI) 🎯
 
@@ -117,14 +122,18 @@ arricchimento — la **lingua** del chunk — è già in `vdb.py` (vedi Stadio 1
 > Stadio 4: account/chiave **personale**, solo i passaggi necessari, testi ©
 > LEV per uso personale e di studio. In alternativa, modello locale.
 
-## Stadio 6 — Oltre (quando servirà davvero)
+## Stadio 6 — Oltre
 
-Da affrontare **solo se e quando un bisogno reale lo chiede**, non in anticipo:
-
-- **Indice approssimato** (`hnswlib`/`faiss`) se la ricerca lineare diventa
-  lenta — cambiamento isolato dietro `Indice.cerca`.
-- **Esposizione** (confronti tra pontificati, trend nel tempo, dashboard): vive
-  nel repo di analisi, alimentato da questo indice arricchito.
+- [ ] **Migrazione a LanceDB** (deciso, vedi [`scelta-store.md`](scelta-store.md)).
+  Sostituire `Indice` (e i puntelli cache/prepared) con uno store embedded
+  on-disk, ibrido vettori+BM25+RRF nativo, `add()` incrementale. Elimina ~metà
+  del plumbing e la fragilità del build. È il prossimo passo concreto a valle
+  del build completo.
+- [ ] **Reranking** col cross-encoder (vedi Stadio 3).
+- [ ] **Indice approssimato** (`hnswlib`/`faiss`) solo se la ricerca diventa
+  lenta davvero (a 175k chunk il brute-force basta ancora).
+- [ ] **Esposizione** (confronti tra pontificati, trend nel tempo, dashboard):
+  vive nel repo di analisi, alimentato da questo indice arricchito.
 
 ## Filo conduttore
 

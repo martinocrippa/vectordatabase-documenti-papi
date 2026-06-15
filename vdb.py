@@ -12,7 +12,11 @@ In piu':
     default (vedi --lingua / --tutto);
   - i risultati sono deduplicati per documento (un solo chunk, il migliore);
   - i pesi del modello stanno in models/ dentro il repo (HF_HOME), non nella
-    cache utente.
+    cache utente; la cache embedding si carica solo in build (non in search).
+
+Il build sull'intero corpus e' lungo su CPU ma **resumabile**: cache embedding
+(models/) + checkpoint dei chunk (indice/meta.prepared.jsonl). Questi puntelli
+sono interim: la direzione e' migrare lo store a LanceDB (doc/scelta-store.md).
 
 Uso:
     python vdb.py build                         # costruisce indice/ da data/
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import pathlib
@@ -104,6 +109,45 @@ def pezzi(corpo: str, n: int = PAROLE_CHUNK) -> list[str]:
     return [" ".join(p[i:i + n]) for i in range(0, len(p), n)] or [""]
 
 
+_SALUTO = re.compile(r"^(Cari|Care|Caro|Fratelli|Sorelle|Eccellenz|Signor|Venerat)", re.I)
+_CODA = re.compile(
+    r"\n\s*(Dopo l['’]Angelus|Dopo la recita|Dopo il Regina|Dopo la preghiera)\b", re.I)
+
+
+def _segmenta(corpo: str) -> tuple[str, str]:
+    """Pulisce il corpo dalle parti non-discorso. Ritorna (corpo, coda_saluti).
+
+    Toglie il blocco intestazione (titolo + bullet di metadati + riga di luogo/
+    data in maiuscolo) e stacca la coda dei saluti italiani ("Dopo l'Angelus").
+    KISS: solo marcatori e poche euristiche (vedi doc/mappa-tipologie.md).
+    """
+    # 1. via il blocco metadati: tutto fino al primo '---' su riga propria
+    parti = re.split(r"\n-{3,}\n", corpo, maxsplit=1)
+    testo = parti[1] if len(parti) == 2 else corpo
+    # 2. stacca la coda saluti (marcatori italiani espliciti)
+    m = _CODA.search(testo)
+    coda = testo[m.start():].strip() if m else ""
+    if m:
+        testo = testo[:m.start()]
+    # 3. salta l'intestazione: parti dal saluto se c'e' nelle prime righe,
+    #    altrimenti dalla prima riga di prosa (minuscole >> maiuscole, lunga)
+    righe = [r.strip() for r in testo.split("\n") if r.strip()]
+    inizio = 0
+    for j in range(min(len(righe), 8)):
+        if _SALUTO.match(righe[j]):
+            inizio = j
+            break
+    else:
+        while inizio < len(righe):
+            r = righe[inizio]
+            minusc = sum(c.islower() for c in r)
+            maiusc = sum(c.isupper() for c in r)
+            if minusc > 2 * maiusc and len(r.split()) >= 8:
+                break
+            inizio += 1
+    return "\n".join(righe[inizio:]), coda
+
+
 def _tok(s: str) -> list[str]:
     """Tokenizzazione semplice per BM25 (parole di >2 lettere, minuscole)."""
     return [w for w in re.findall(r"[a-zàèéìòóù]+", s.lower()) if len(w) > 2]
@@ -126,15 +170,48 @@ def _prevalente(chunks: list[str], lingue: list[str]) -> str:
 
 
 class Embedder:
-    """Incapsula il modello locale: testi -> vettori normalizzati."""
+    """Incapsula il modello locale: testi -> vettori normalizzati.
+
+    I vettori dei passaggi sono messi in **cache su disco** (in models/, keyed da
+    hash del testo): ogni chunk si embedda una volta sola, i run successivi lo
+    riusano. Niente piu' re-embedding dello stesso testo a ogni build/esperimento.
+    """
 
     def __init__(self, modello=MODELLO):
         self.model = SentenceTransformer(modello)
+        self._cache_path = ROOT / "models" / f"emb_{modello.split('/')[-1]}.pkl"
+        self._cache = None   # pigra: la cache serve solo in build, non in search
 
-    def passaggi(self, testi: list[str]) -> np.ndarray:
-        return self.model.encode([PREF_P + t for t in testi],
-                                 normalize_embeddings=True, batch_size=64,
-                                 show_progress_bar=False)
+    def _carica_cache(self) -> dict:
+        if self._cache is None:
+            self._cache = (pickle.loads(self._cache_path.read_bytes())
+                           if self._cache_path.exists() else {})
+        return self._cache
+
+    def passaggi(self, testi: list[str], checkpoint: int = 8000) -> np.ndarray:
+        self._carica_cache()
+        chiavi = [hashlib.sha1(t.encode("utf-8")).hexdigest() for t in testi]
+        manca = [(t, k) for t, k in zip(testi, chiavi) if k not in self._cache]
+        # embedding a blocchi con salvataggio periodico: un build lungo che si
+        # interrompe riprende dalla cache (i chunk gia' fatti sono saltati).
+        for s in range(0, len(manca), checkpoint):
+            blocco = manca[s:s + checkpoint]
+            v = self.model.encode([PREF_P + t for t, _ in blocco],
+                                  normalize_embeddings=True, batch_size=64,
+                                  show_progress_bar=False).astype("float32")
+            for (_, k), riga in zip(blocco, v):
+                self._cache[k] = riga
+            self._salva_cache()
+            if len(manca) > checkpoint:
+                print(f"  embedding: {min(s + checkpoint, len(manca))}/{len(manca)} "
+                      f"nuovi chunk (cache salvata)")
+        return np.vstack([self._cache[k] for k in chiavi])
+
+    def _salva_cache(self) -> None:
+        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._cache_path.with_suffix(".tmp")   # salvataggio atomico
+        tmp.write_bytes(pickle.dumps(self._cache))
+        os.replace(tmp, self._cache_path)
 
     def query(self, q: str) -> np.ndarray:
         return self.model.encode(PREF_Q + q, normalize_embeddings=True)
@@ -182,21 +259,70 @@ def _rrf(*ranking: list[int]) -> dict[int, float]:
 
 # --- orchestrazione ----------------------------------------------------------
 
+def _prepara_doc(doc: dict) -> list[dict]:
+    """Prepara i chunk di UN documento (testo + sezione + lingua), senza embedding."""
+    corpo, coda = _segmenta(doc["corpo"])
+    # chunk del corpo (sezione=corpo) + chunk della coda saluti (sezione=saluti)
+    segmenti = [("corpo", c) for c in pezzi(corpo)]
+    if coda:
+        segmenti += [("saluti", c) for c in pezzi(coda)]
+    lingue = [_lingua(t) for _, t in segmenti]
+    cc = [t for (s, t), _ in zip(segmenti, lingue) if s == "corpo"]
+    cl = [lg for (s, _), lg in zip(segmenti, lingue) if s == "corpo"]
+    lingua_doc = _prevalente(cc or [t for _, t in segmenti], cl or lingue)
+    out = []
+    for i, ((sez, pz), lg) in enumerate(zip(segmenti, lingue)):
+        # escludibile dalla ricerca: i saluti (coda) e i "doppioni" tradotti
+        # (chunk in lingua diversa dal corpo del documento).
+        escl = sez == "saluti" or (lg != lingua_doc and lg != "und")
+        out.append({c: doc[c] for c in CAMPI} | {
+            "testo": pz, "i": i, "sezione": sez, "lingua": lg,
+            "lingua_doc": lingua_doc, "escludibile": escl})
+    return out
+
+
 def costruisci(data_dir="data", out="indice", per_papa=None) -> Indice:
-    """documenti -> pezzi -> embedding + BM25 -> salva."""
+    """documenti -> pezzi -> embedding + BM25 -> salva.
+
+    **Resumabile.** La preparazione dei chunk (lettura + lingua, la parte lenta)
+    è salvata documento per documento in <out>/meta.prepared.jsonl: se il build
+    si interrompe, al rilancio salta i documenti già preparati. Con la cache
+    embedding (Embedder) anche i vettori si riusano. Così bastano pochi rilanci
+    per arrivare in fondo, anche su CPU.
+    """
     emb = Embedder()
-    meta = []
+    out_p = pathlib.Path(out)
+    out_p.mkdir(parents=True, exist_ok=True)
+    incrementale = per_papa is None       # solo il build completo è resumabile
+    prep = out_p / "meta.prepared.jsonl"
+    meta, fatti = [], set()
+    if incrementale and prep.exists():
+        for r in prep.read_text(encoding="utf-8").splitlines():
+            try:
+                meta.append(json.loads(r))
+            except ValueError:
+                pass                       # tollera l'ultima riga troncata
+        fatti = {m["url"] for m in meta}
+        print(f"Riprendo: {len(meta)} chunk da {len(fatti)} documenti già preparati.")
+
+    f = open(prep, "a", encoding="utf-8") if incrementale else None
+    nuovi = 0
     for doc in documenti(data_dir, per_papa):
-        chs = pezzi(doc["corpo"])
-        lingue = [_lingua(t) for t in chs]
-        lingua_doc = _prevalente(chs, lingue)   # flag lingua prevalente del documento
-        for i, (pz, lg) in enumerate(zip(chs, lingue)):
-            # un chunk in lingua diversa dal documento e' un "doppione" (saluto
-            # tradotto): lo teniamo ma marchiamo escludibile dalla ricerca.
-            meta.append({c: doc[c] for c in CAMPI} | {
-                "testo": pz, "i": i, "lingua": lg, "lingua_doc": lingua_doc,
-                "escludibile": lg != lingua_doc and lg != "und"})
-    print(f"{len(meta)} chunk. Calcolo embedding (modello {MODELLO})...")
+        if doc["url"] in fatti:
+            continue
+        chs = _prepara_doc(doc)
+        meta.extend(chs)
+        if f:
+            for m in chs:
+                f.write(json.dumps(m, ensure_ascii=False) + "\n")
+            nuovi += 1
+            if nuovi % 1000 == 0:
+                f.flush()
+                print(f"  preparati altri {nuovi} documenti...")
+    if f:
+        f.flush()
+        f.close()
+    print(f"{len(meta)} chunk pronti. Calcolo embedding (modello {MODELLO})...")
     vettori = emb.passaggi([m["testo"] for m in meta]).astype("float32")
     bm25 = BM25Okapi([_tok(m["testo"]) for m in meta])
     idx = Indice(vettori, bm25, meta)

@@ -47,9 +47,12 @@ La scelta più semplice che regge il volume del corpus (vedi
 
 ```
 indice/
-  vettori.npy     # matrice float32 (N_chunk × dim), vettori L2-normalizzati
-  bm25.pkl        # indice BM25 sui testi dei chunk (lessico + statistiche)
-  meta.jsonl      # una riga JSON per chunk, nello stesso ordine della matrice
+  vettori.npy          # matrice float32 (N_chunk × dim), vettori L2-normalizzati
+  bm25.pkl             # indice BM25 sui testi dei chunk (lessico + statistiche)
+  meta.jsonl           # una riga JSON per chunk, nello stesso ordine della matrice
+  meta.prepared.jsonl  # (interim) checkpoint dei chunk preparati, per riprendere il build
+models/
+  emb_<modello>.pkl    # (interim) cache degli embedding per chunk (hash→vettore)
 ```
 
 - **Vettori** → un singolo array NumPy `float32`. Normalizzati a norma 1, così
@@ -67,21 +70,24 @@ indice/
 > `.gitignore`, come `data/`. Si rigenera in locale. Non si versiona, non si
 > pubblica.
 
-### Perché NON un database esterno (per ora)
+### Persistenza: stato e direzione (→ LanceDB)
 
-Niente FAISS, niente Chroma/Qdrant/pgvector, niente server. Il brute-force con
-NumPy regge questo volume e ha un costo cognitivo vicino a zero: un file, una
-matrice, un prodotto. Anche l'ibrido si fa in locale (BM25 con una libreria
-leggera + RRF in poche righe). Un indice approssimato (`hnswlib`/`faiss`) si
-aggiunge **solo quando la ricerca lineare diventa lenta davvero** — cambiamento
-isolato dietro `Indice`, non una riscrittura.
+La **ricerca** con NumPy brute-force regge benissimo questo volume (coseno su
+~175k vettori = millisecondi): lì un DB non serve. Il problema è emerso nel
+**build sull'intero corpus**: la persistenza fatta a mano (cache embedding +
+`meta.prepared` + ri-salvataggi) è diventata fragile — la cache da ~450 MB
+ricaricata a ogni run, tenuta in RAM, checkpoint con stato. `emb_*.pkl` e
+`meta.prepared.jsonl` sono **puntelli interim**, nati per finire il build su CPU.
 
-**MongoDB Atlas** è l'alternativa *gestita* naturale: fa già ibrido nativo —
-full-text **BM25** (Lucene) + **Vector Search**, fusi con **`$rankFusion`** (RRF)
-— e regge la scala senza scriverselo. Lo terremo presente come passo di crescita,
-con un'avvertenza: è un servizio cloud, quindi i testi (© LEV) **uscirebbero
-dalla macchina**. Per la fase personale/di studio restiamo **local-first**;
-Atlas diventa interessante se/quando serve esporre il servizio a più persone.
+**Decisione: migrare `Indice` a [LanceDB](scelta-store.md)** — store embedded,
+on-disk memory-mapped, `add()` incrementale e persistente, con **ibrido
+vettori + BM25 + RRF nativo**. Elimina cache/checkpoint/`bm25.pkl`/`vettori.npy`
+e `_rrf`/`per_vettore`/`per_keyword` (≈ metà del plumbing), lasciando invariati
+`documenti`/`_segmenta`/`pezzi`/`_lingua`/`Embedder`. Non accelera l'embedding
+(quello resta calcolo su CPU), ma toglie la fragilità di salvataggio/ripresa.
+Dettaglio e confronto (Chroma, sqlite-vec, Qdrant) in
+[`scelta-store.md`](scelta-store.md). **MongoDB Atlas** scartato: è cloud → i
+testi (© LEV) uscirebbero dalla macchina.
 
 ## Ricerca ibrida (vettori + BM25 + reranking)
 

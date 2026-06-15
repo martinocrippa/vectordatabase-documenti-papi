@@ -68,8 +68,12 @@ In [`doc/`](doc/):
   primitive, dipendenze minime, tutto locale.
 - [`doc/mappa-tipologie.md`](doc/mappa-tipologie.md) — struttura dei documenti
   per tipologia e strategia di chunking ibrido (struttura + overlap).
+- [`doc/scelta-store.md`](doc/scelta-store.md) — valutazione vector DB e
+  decisione di migrare a **LanceDB**.
 - [`doc/piano-di-sviluppo.md`](doc/piano-di-sviluppo.md) — gli stadi di sviluppo,
   uno per volta.
+- [`prove/`](prove/) — esperimenti (regex vs embedding, ibrido, temi) e una
+  [sintesi divulgativa](prove/sintesi-per-un-amico.md) dei risultati.
 
 ## Stato
 
@@ -85,6 +89,17 @@ python vdb.py build --per-papa 50          # indice da un campione (prova veloce
 python vdb.py search "custodire il creato" --papa francesco
 python vdb.py search "lo sport e gli atleti" --lingua it   # solo italiano
 ```
+
+**Build sull'intero corpus:** è **lungo su CPU (ore)** — l'embedding di ~175.000
+chunk è il collo di bottiglia. Il `build` è **resumabile** (cache embedding +
+checkpoint dei chunk): se si interrompe, rilancialo e riprende. Finora
+indicizzato ~83% del corpus. Questi puntelli (cache/checkpoint) sono **interim**:
+la direzione è migrare lo store a **LanceDB** (vedi
+[doc/scelta-store.md](doc/scelta-store.md)).
+
+**Primi risultati** (dalle domande di partenza): *"Francesco è comunista / senza
+continuità?"* → **continuità schiacciante**, accenti diversi, comunismo no. Il
+racconto in [prove/sintesi-per-un-amico.md](prove/sintesi-per-un-amico.md).
 
 Dettagli sull'ambiente (conda/venv) in [setup/README.md](setup/README.md).
 
@@ -105,5 +120,6 @@ scaricalo", quindi non serve gestire il download a mano. Il warning
 > `HF_HOME` a mano prima di lanciare `vdb.py`. Vedi
 > [setup/README.md](setup/README.md).
 
-Da fare (vedi piano): chunking strutturale per tipologia, reranking, `build`
-incrementale sull'intero corpus.
+Da fare (vedi [piano](doc/piano-di-sviluppo.md)): **migrazione a LanceDB**
+(store on-disk, ibrido nativo, incrementale → toglie cache/checkpoint),
+reranking col cross-encoder, chunking strutturale per tipologia.
