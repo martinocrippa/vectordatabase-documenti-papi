@@ -3,4 +3,5 @@
 sentence-transformers>=2.2   # embedding e5 (porta torch, transformers); base anche per il futuro reranker
 numpy>=1.24                  # vettori
 lancedb>=0.24                # store embedded on-disk + ricerca ibrida (vettori + full-text/BM25 + RRF)
+pyarrow>=14                  # tabelle Arrow (usato in `arricchisci`; arriva anche con lancedb)
 py3langid>=0.3               # riconoscimento lingua dei chunk (isola i saluti tradotti)

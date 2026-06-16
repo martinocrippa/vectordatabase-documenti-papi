@@ -4,6 +4,7 @@ channels:
 dependencies:
   - python=3.12
   - numpy>=1.24
+  - pyarrow>=14               # tabelle Arrow (usato in `arricchisci`; arriva anche con lancedb)
   - py3langid>=0.3            # riconoscimento lingua dei chunk (da conda-forge)
   - pip
   - pip:
