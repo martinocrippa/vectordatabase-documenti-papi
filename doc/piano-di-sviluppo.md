@@ -124,14 +124,17 @@ arricchimento — la **lingua** del chunk — è già in `vdb.py` (vedi Stadio 1
 
 ## Stadio 6 — Oltre
 
-- [ ] **Migrazione a LanceDB** (deciso, vedi [`scelta-store.md`](scelta-store.md)).
-  Sostituire `Indice` (e i puntelli cache/prepared) con uno store embedded
-  on-disk, ibrido vettori+BM25+RRF nativo, `add()` incrementale. Elimina ~metà
-  del plumbing e la fragilità del build. È il prossimo passo concreto a valle
-  del build completo.
+- [x] **Migrazione a LanceDB** (fatta, vedi [`scelta-store.md`](scelta-store.md)).
+  `Indice` (vettori.npy/bm25.pkl/RRF) e la cache embedding **rimossi**: lo store
+  è una tabella LanceDB on-disk, ibrida vettori+full-text+RRF nativa, `add()`
+  incrementale, **ricerca flat** (niente ANN). ~Metà del plumbing in meno.
+- [x] **Query apposita `primo-saluto`**: i primi saluti "Urbi et Orbi" dalla
+  loggia dopo l'elezione (uno per Papa), trovati per titolo.
 - [ ] **Reranking** col cross-encoder (vedi Stadio 3).
-- [ ] **Indice approssimato** (`hnswlib`/`faiss`) solo se la ricerca diventa
-  lenta davvero (a 175k chunk il brute-force basta ancora).
+- [ ] **Indice approssimato** (l'IVF-PQ di LanceDB, o `hnswlib`/`faiss`) solo se
+  la ricerca diventa lenta davvero: a 175k chunk il brute-force basta ancora, e
+  l'ANN aggiunge tuning e recall approssimato in cambio di niente (vedi la scelta
+  esplicita in [`scelta-store.md`](scelta-store.md)).
 - [ ] **Esposizione** (confronti tra pontificati, trend nel tempo, dashboard):
   vive nel repo di analisi, alimentato da questo indice arricchito.
 

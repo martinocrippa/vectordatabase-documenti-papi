@@ -1,66 +1,62 @@
 #!/usr/bin/env python3
-"""vdb.py - vector database dei documenti dei Papi: indice + ricerca ibrida.
+"""vdb.py - vector database dei documenti dei Papi: indice + ricerca ibrida (LanceDB).
 
-Un solo file, poche primitive (vedi doc/architettura.md):
-    documenti -> pezzi -> Embedder -> Indice (vettori + BM25)
-La ricerca e' IBRIDA: vettori (significato) + BM25 (parole) fusi con RRF,
-senza soglie. L'indice si costruisce una volta e si salva in indice/.
+Un solo file, poche primitive:
+    documenti -> _segmenta/pezzi -> Embedder -> tabella LanceDB (vettori + full-text)
+La ricerca e' IBRIDA e nativa: vettori (significato) + full-text/BM25 (parole),
+fusi con RRF da LanceDB. Lo store e' on-disk in indice/, incrementale: niente piu'
+vettori.npy/bm25.pkl/RRF fatti a mano.
 
 In piu':
-  - ogni chunk e' etichettato con la lingua; i saluti tradotti in altra lingua
-    (i "doppioni") sono marcati escludibili e tenuti fuori dalla ricerca di
-    default (vedi --lingua / --tutto);
-  - i risultati sono deduplicati per documento (un solo chunk, il migliore);
-  - i pesi del modello stanno in models/ dentro il repo (HF_HOME), non nella
-    cache utente; la cache embedding si carica solo in build (non in search).
+  - chunking strutturale (_segmenta): toglie intestazione e coda saluti italiani;
+  - ogni chunk ha la lingua; i saluti tradotti sono 'escludibili' (fuori ricerca
+    di default; --lingua / --tutto per controllarlo);
+  - risultati deduplicati per documento (un solo chunk, il migliore);
+  - pesi del modello in models/ (HF_HOME), non nella cache utente.
 
-Il build sull'intero corpus e' lungo su CPU ma **resumabile**: cache embedding
-(models/) + checkpoint dei chunk (indice/meta.prepared.jsonl). Questi puntelli
-sono interim: la direzione e' migrare lo store a LanceDB (doc/scelta-store.md).
+Il build sull'intero corpus e' lungo su CPU (l'embedding e' il collo di bottiglia)
+ma resumabile: i chunk preparati sono in indice/meta.prepared.jsonl e LanceDB
+persiste ogni blocco aggiunto, quindi al rilancio si riparte dalle righe gia'
+presenti (niente re-embedding).
 
 Uso:
-    python vdb.py build                         # costruisce indice/ da data/
-    python vdb.py build --per-papa 50           # campione (per provare)
+    python vdb.py build                      # costruisce/aggiorna l'indice da data/
+    python vdb.py build --per-papa 50        # campione fresco (prova veloce)
     python vdb.py search "cosa dice sulla pace?"
-    python vdb.py search "..." --papa francesco --tipo angelus -k 8
-    python vdb.py search "..." --lingua it       # solo chunk italiani
-    python vdb.py search "..." --tutto           # includi i saluti tradotti
+    python vdb.py search "..." --papa francesco --tipo angelus --lingua it -k 8
+    python vdb.py search "..." --tutto       # includi i saluti tradotti
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
-import hashlib
 import json
 import os
 import pathlib
-import pickle
 import re
 import sys
 
 import numpy as np
 import py3langid as langid
-from rank_bm25 import BM25Okapi
 
-# Lingue attese nel corpus (corpi + saluti). Restringere migliora l'accuratezza
-# del riconoscimento su testi brevi.
+# Lingue attese nel corpus (corpi + saluti). Restringere migliora l'accuratezza.
 langid.set_languages(["it", "en", "fr", "es", "de", "pt", "pl"])
 
 ROOT = pathlib.Path(__file__).resolve().parent   # data/, indice/, models/ stanno qui
 
 # I pesi del modello vivono in models/ dentro il repo (gitignored), non nella
 # cache utente. HF_HOME va impostato PRIMA di importare sentence_transformers.
-# setdefault: se l'utente ha gia' un HF_HOME suo, lo rispettiamo.
 os.environ.setdefault("HF_HOME", str(ROOT / "models"))
 
 from sentence_transformers import SentenceTransformer  # noqa: E402
+import lancedb  # noqa: E402
+from lancedb.rerankers import RRFReranker  # noqa: E402
 
 MODELLO = "intfloat/multilingual-e5-base"   # modello da retrieval (vedi review)
 PREF_Q, PREF_P = "query: ", "passage: "     # e5 vuole questi prefissi
 PAROLE_CHUNK = 180
-K_RRF = 60                                  # costante della Reciprocal Rank Fusion
-N_CANDIDATI = 50                            # candidati per retriever prima della fusione
+BATCH = 2000                                # chunk per blocco di embedding/add
 CAMPI = ("papa", "tipologia", "data", "titolo", "url")
 
 
@@ -100,11 +96,7 @@ def documenti(data_dir="data", per_papa=None):
 
 
 def pezzi(corpo: str, n: int = PAROLE_CHUNK) -> list[str]:
-    """Spezza il corpo in finestre da ~n parole.
-
-    Chunking semplice (un primo passo). Quello strutturale per tipologia
-    e' descritto in doc/mappa-tipologie.md ed e' il refinement successivo.
-    """
+    """Spezza il corpo in finestre da ~n parole."""
     p = corpo.split()
     return [" ".join(p[i:i + n]) for i in range(0, len(p), n)] or [""]
 
@@ -148,11 +140,6 @@ def _segmenta(corpo: str) -> tuple[str, str]:
     return "\n".join(righe[inizio:]), coda
 
 
-def _tok(s: str) -> list[str]:
-    """Tokenizzazione semplice per BM25 (parole di >2 lettere, minuscole)."""
-    return [w for w in re.findall(r"[a-zàèéìòóù]+", s.lower()) if len(w) > 2]
-
-
 def _lingua(testo: str) -> str:
     """Lingua del testo (codice ISO) o 'und' se troppo corto per decidere."""
     t = testo.strip()
@@ -169,100 +156,9 @@ def _prevalente(chunks: list[str], lingue: list[str]) -> str:
     return peso.most_common(1)[0][0] if peso else "und"
 
 
-class Embedder:
-    """Incapsula il modello locale: testi -> vettori normalizzati.
-
-    I vettori dei passaggi sono messi in **cache su disco** (in models/, keyed da
-    hash del testo): ogni chunk si embedda una volta sola, i run successivi lo
-    riusano. Niente piu' re-embedding dello stesso testo a ogni build/esperimento.
-    """
-
-    def __init__(self, modello=MODELLO):
-        self.model = SentenceTransformer(modello)
-        self._cache_path = ROOT / "models" / f"emb_{modello.split('/')[-1]}.pkl"
-        self._cache = None   # pigra: la cache serve solo in build, non in search
-
-    def _carica_cache(self) -> dict:
-        if self._cache is None:
-            self._cache = (pickle.loads(self._cache_path.read_bytes())
-                           if self._cache_path.exists() else {})
-        return self._cache
-
-    def passaggi(self, testi: list[str], checkpoint: int = 8000) -> np.ndarray:
-        self._carica_cache()
-        chiavi = [hashlib.sha1(t.encode("utf-8")).hexdigest() for t in testi]
-        manca = [(t, k) for t, k in zip(testi, chiavi) if k not in self._cache]
-        # embedding a blocchi con salvataggio periodico: un build lungo che si
-        # interrompe riprende dalla cache (i chunk gia' fatti sono saltati).
-        for s in range(0, len(manca), checkpoint):
-            blocco = manca[s:s + checkpoint]
-            v = self.model.encode([PREF_P + t for t, _ in blocco],
-                                  normalize_embeddings=True, batch_size=64,
-                                  show_progress_bar=False).astype("float32")
-            for (_, k), riga in zip(blocco, v):
-                self._cache[k] = riga
-            self._salva_cache()
-            if len(manca) > checkpoint:
-                print(f"  embedding: {min(s + checkpoint, len(manca))}/{len(manca)} "
-                      f"nuovi chunk (cache salvata)")
-        return np.vstack([self._cache[k] for k in chiavi])
-
-    def _salva_cache(self) -> None:
-        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._cache_path.with_suffix(".tmp")   # salvataggio atomico
-        tmp.write_bytes(pickle.dumps(self._cache))
-        os.replace(tmp, self._cache_path)
-
-    def query(self, q: str) -> np.ndarray:
-        return self.model.encode(PREF_Q + q, normalize_embeddings=True)
-
-
-class Indice:
-    """Vettori (matrice NumPy) + BM25 sui testi + metadati paralleli."""
-
-    def __init__(self, vettori: np.ndarray, bm25: BM25Okapi, meta: list[dict]):
-        self.vettori, self.bm25, self.meta = vettori, bm25, meta
-
-    def salva(self, out="indice") -> None:
-        p = pathlib.Path(out)
-        p.mkdir(parents=True, exist_ok=True)
-        np.save(p / "vettori.npy", self.vettori)
-        (p / "bm25.pkl").write_bytes(pickle.dumps(self.bm25))
-        with open(p / "meta.jsonl", "w", encoding="utf-8") as f:
-            for m in self.meta:
-                f.write(json.dumps(m, ensure_ascii=False) + "\n")
-
-    @classmethod
-    def carica(cls, out="indice") -> "Indice":
-        p = pathlib.Path(out)
-        vettori = np.load(p / "vettori.npy")
-        bm25 = pickle.loads((p / "bm25.pkl").read_bytes())
-        meta = [json.loads(r) for r in
-                (p / "meta.jsonl").read_text(encoding="utf-8").splitlines()]
-        return cls(vettori, bm25, meta)
-
-    def per_vettore(self, qv: np.ndarray, k: int) -> list[int]:
-        return list(np.argsort(-(self.vettori @ qv))[:k])
-
-    def per_keyword(self, qtok: list[str], k: int) -> list[int]:
-        return list(np.argsort(-self.bm25.get_scores(qtok))[:k])
-
-
-def _rrf(*ranking: list[int]) -> dict[int, float]:
-    """Reciprocal Rank Fusion: fonde liste ordinate usando solo le posizioni."""
-    punti: dict[int, float] = {}
-    for lista in ranking:
-        for pos, idx in enumerate(lista):
-            punti[int(idx)] = punti.get(int(idx), 0.0) + 1.0 / (K_RRF + pos)
-    return punti
-
-
-# --- orchestrazione ----------------------------------------------------------
-
 def _prepara_doc(doc: dict) -> list[dict]:
     """Prepara i chunk di UN documento (testo + sezione + lingua), senza embedding."""
     corpo, coda = _segmenta(doc["corpo"])
-    # chunk del corpo (sezione=corpo) + chunk della coda saluti (sezione=saluti)
     segmenti = [("corpo", c) for c in pezzi(corpo)]
     if coda:
         segmenti += [("saluti", c) for c in pezzi(coda)]
@@ -271,29 +167,45 @@ def _prepara_doc(doc: dict) -> list[dict]:
     cl = [lg for (s, _), lg in zip(segmenti, lingue) if s == "corpo"]
     lingua_doc = _prevalente(cc or [t for _, t in segmenti], cl or lingue)
     out = []
-    for i, ((sez, pz), lg) in enumerate(zip(segmenti, lingue)):
-        # escludibile dalla ricerca: i saluti (coda) e i "doppioni" tradotti
-        # (chunk in lingua diversa dal corpo del documento).
+    for (sez, pz), lg in zip(segmenti, lingue):     # riusa lingue (no doppio langid)
         escl = sez == "saluti" or (lg != lingua_doc and lg != "und")
         out.append({c: doc[c] for c in CAMPI} | {
-            "testo": pz, "i": i, "sezione": sez, "lingua": lg,
-            "lingua_doc": lingua_doc, "escludibile": escl})
+            "testo": pz, "sezione": sez, "lingua": lg, "escludibile": escl})
     return out
 
 
-def costruisci(data_dir="data", out="indice", per_papa=None) -> Indice:
-    """documenti -> pezzi -> embedding + BM25 -> salva.
+class Embedder:
+    """Modello locale e5: testi -> vettori normalizzati.
 
-    **Resumabile.** La preparazione dei chunk (lettura + lingua, la parte lenta)
-    è salvata documento per documento in <out>/meta.prepared.jsonl: se il build
-    si interrompe, al rilancio salta i documenti già preparati. Con la cache
-    embedding (Embedder) anche i vettori si riusano. Così bastano pochi rilanci
-    per arrivare in fondo, anche su CPU.
+    Niente cache degli embedding: LanceDB persiste i vettori, e il build riprende
+    saltando i chunk già nella tabella. Si embedda solo ciò che non c'è ancora.
     """
-    emb = Embedder()
-    out_p = pathlib.Path(out)
-    out_p.mkdir(parents=True, exist_ok=True)
-    incrementale = per_papa is None       # solo il build completo è resumabile
+
+    def __init__(self, modello=MODELLO):
+        self.model = SentenceTransformer(modello)
+
+    def passaggi(self, testi: list[str]) -> np.ndarray:
+        return self.model.encode([PREF_P + t for t in testi],
+                                 normalize_embeddings=True, batch_size=64,
+                                 show_progress_bar=False).astype("float32")
+
+    def query(self, q: str) -> np.ndarray:
+        return self.model.encode(PREF_Q + q, normalize_embeddings=True)
+
+
+# --- costruzione e ricerca (LanceDB) -----------------------------------------
+
+def _riga(m: dict, vec) -> dict:
+    """Una riga della tabella LanceDB: metadati + testo + vettore."""
+    return {**{c: m[c] for c in CAMPI}, "testo": m["testo"], "sezione": m["sezione"],
+            "lingua": m["lingua"], "escludibile": bool(m["escludibile"]),
+            "vector": np.asarray(vec, dtype="float32")}
+
+
+def _prepara(data_dir, out_p, per_papa):
+    """Prepara tutti i chunk. Per il build completo usa/aggiorna il checkpoint
+    indice/meta.prepared.jsonl (salta lettura+lingua dei documenti già fatti)."""
+    incrementale = per_papa is None
     prep = out_p / "meta.prepared.jsonl"
     meta, fatti = [], set()
     if incrementale and prep.exists():
@@ -301,10 +213,9 @@ def costruisci(data_dir="data", out="indice", per_papa=None) -> Indice:
             try:
                 meta.append(json.loads(r))
             except ValueError:
-                pass                       # tollera l'ultima riga troncata
+                pass
         fatti = {m["url"] for m in meta}
-        print(f"Riprendo: {len(meta)} chunk da {len(fatti)} documenti già preparati.")
-
+        print(f"Riprendo preparazione: {len(meta)} chunk da {len(fatti)} documenti.")
     f = open(prep, "a", encoding="utf-8") if incrementale else None
     nuovi = 0
     for doc in documenti(data_dir, per_papa):
@@ -322,42 +233,95 @@ def costruisci(data_dir="data", out="indice", per_papa=None) -> Indice:
     if f:
         f.flush()
         f.close()
-    print(f"{len(meta)} chunk pronti. Calcolo embedding (modello {MODELLO})...")
-    vettori = emb.passaggi([m["testo"] for m in meta]).astype("float32")
-    bm25 = BM25Okapi([_tok(m["testo"]) for m in meta])
-    idx = Indice(vettori, bm25, meta)
-    idx.salva(out)
-    print(f"Indice salvato in {out}/ ({len(meta)} chunk).")
-    return idx
+    return meta
+
+
+def costruisci(data_dir="data", out="indice", per_papa=None):
+    """Prepara i chunk, li embedda a blocchi e li scrive in una tabella LanceDB.
+
+    Resumabile: LanceDB persiste ogni blocco; al rilancio si riparte dal numero
+    di righe già presenti. Un campione (--per-papa) ricrea la tabella da zero.
+    """
+    emb = Embedder()
+    out_p = pathlib.Path(out)
+    out_p.mkdir(parents=True, exist_ok=True)
+    meta = _prepara(data_dir, out_p, per_papa)
+
+    db = lancedb.connect(out)
+    try:
+        tab = db.open_table("chunk")
+    except Exception:
+        tab = None
+    if per_papa is not None and tab is not None:
+        db.drop_table("chunk")                       # campione: tabella fresca
+        tab = None
+    start = tab.count_rows() if tab is not None else 0
+    print(f"{len(meta)} chunk; già nell'indice: {start}. Embedding + scrittura...")
+    for i in range(start, len(meta), BATCH):
+        blocco = meta[i:i + BATCH]
+        vecs = emb.passaggi([m["testo"] for m in blocco])
+        righe = [_riga(m, v) for m, v in zip(blocco, vecs)]
+        if tab is None:
+            tab = db.create_table("chunk", data=righe)
+        else:
+            tab.add(righe)
+        print(f"  indicizzati {min(i + BATCH, len(meta))}/{len(meta)}")
+    if tab is not None:
+        tab.create_fts_index("testo", replace=True)   # full-text/BM25 per l'ibrido
+        print(f"Indice LanceDB pronto: {tab.count_rows()} chunk in {out}/")
+    return tab
+
+
+# Query apposita: i primi saluti/benedizioni "Urbi et Orbi" dalla loggia subito
+# dopo l'elezione (uno per Papa). Identificati per titolo (più affidabile della
+# ricerca semantica: sono testi corti e generici). Esclude i "primi saluti" di
+# viaggio (es. all'arrivo in un Paese).
+_FILTRO_PRIMO_SALUTO = (
+    "lower(titolo) LIKE '%prima benedizione%'"                       # Leone XIV
+    " OR (lower(titolo) LIKE '%primo saluto%' AND ("                 # gli altri,
+    "lower(titolo) LIKE '%urbi et orbi%'"                            # ma non i
+    " OR lower(titolo) LIKE '%ai fedeli%'))")                        # saluti di viaggio
+
+
+def primi_saluti(out="indice") -> list[dict]:
+    """I primi saluti dalla loggia dopo l'elezione (un documento per Papa)."""
+    tab = lancedb.connect(out).open_table("chunk")
+    righe = tab.search().where(_FILTRO_PRIMO_SALUTO).limit(500).to_list()
+    visti, risultati = set(), []
+    for r in sorted(righe, key=lambda r: r.get("data", "")):
+        u = r.get("url") or r["titolo"]
+        if u not in visti:
+            visti.add(u)
+            risultati.append(r)
+    return risultati
 
 
 def cerca(query: str, k=5, papa=None, tipo=None, lingua=None, tutto=False,
-          out="indice", n=N_CANDIDATI) -> list[dict]:
-    """Ricerca ibrida: vettori + BM25 fusi con RRF, poi filtri sui metadati.
+          out="indice", n=60) -> list[dict]:
+    """Ricerca ibrida nativa LanceDB: vettori + full-text fusi con RRF.
 
-    Di default esclude i chunk "escludibili" (saluti tradotti in altra lingua):
-    `tutto=True` li reinclude. `lingua` filtra su una lingua specifica.
+    Di default esclude i chunk "escludibili" (saluti/tradotti); `tutto=True` li
+    reinclude. Filtri su papa, tipologia, lingua. Dedup per documento.
     """
     emb = Embedder()
-    idx = Indice.carica(out)
-    fusi = _rrf(idx.per_vettore(emb.query(query), n),
-                idx.per_keyword(_tok(query), n))
+    tab = lancedb.connect(out).open_table("chunk")
+    conds = [] if tutto else ["escludibile = false"]
+    if lingua:
+        conds.append(f"lingua = '{lingua}'")
+    if tipo:
+        conds.append(f"tipologia = '{tipo}'")
+    q = tab.search(query_type="hybrid").vector(emb.query(query)).text(query).limit(n)
+    if conds:
+        q = q.where(" AND ".join(conds), prefilter=True)
     risultati, visti = [], set()
-    for i in sorted(fusi, key=lambda j: -fusi[j]):
-        m = idx.meta[i]
-        if not tutto and m.get("escludibile"):
+    for r in q.rerank(RRFReranker()).to_list():
+        if papa and papa.lower() not in r["papa"].lower():
             continue
-        if lingua and m.get("lingua") != lingua:
+        u = r.get("url") or r["titolo"]
+        if u in visti:
             continue
-        if papa and m["papa"].lower().find(papa.lower()) < 0:
-            continue
-        if tipo and m["tipologia"] != tipo:
-            continue
-        doc = m.get("url") or m.get("titolo")   # un solo (il migliore) chunk per documento
-        if doc in visti:
-            continue
-        visti.add(doc)
-        risultati.append(m)
+        visti.add(u)
+        risultati.append(r)
         if len(risultati) >= k:
             break
     return risultati
@@ -366,17 +330,16 @@ def cerca(query: str, k=5, papa=None, tipo=None, lingua=None, tutto=False,
 # --- CLI ---------------------------------------------------------------------
 
 def main() -> int:
-    # La console Windows (cp1252) non stampa certi caratteri (titoli con accenti
-    # o lettere straniere): forziamo UTF-8 per non far crashare la stampa.
+    # La console Windows (cp1252) non stampa certi caratteri: forziamo UTF-8.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="vector database dei documenti dei Papi")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    b = sub.add_parser("build", help="costruisce l'indice da data/")
+    b = sub.add_parser("build", help="costruisce/aggiorna l'indice LanceDB da data/")
     b.add_argument("--data", default=str(ROOT / "data"))
     b.add_argument("--out", default=str(ROOT / "indice"))
     b.add_argument("--per-papa", type=int, default=None,
-                   help="campiona N documenti per Papa (per prove veloci)")
+                   help="campiona N documenti per Papa (tabella fresca, per prove)")
 
     s = sub.add_parser("search", help="ricerca ibrida sull'indice")
     s.add_argument("query")
@@ -385,8 +348,12 @@ def main() -> int:
     s.add_argument("--tipo", default=None)
     s.add_argument("--lingua", default=None, help="filtra i chunk per lingua (es. it)")
     s.add_argument("--tutto", action="store_true",
-                   help="includi anche i chunk escludibili (saluti tradotti)")
+                   help="includi anche i chunk escludibili (saluti/tradotti)")
     s.add_argument("--out", default=str(ROOT / "indice"))
+
+    ps = sub.add_parser("primo-saluto",
+                        help="i primi saluti 'Urbi et Orbi' dopo l'elezione (uno per Papa)")
+    ps.add_argument("--out", default=str(ROOT / "indice"))
 
     a = ap.parse_args()
     if a.cmd == "build":
@@ -397,6 +364,11 @@ def main() -> int:
             print(f"{r}. {m['papa']} · {m['tipologia']} · {m['data']} · [{m.get('lingua', '?')}]")
             print(f"   {m['titolo']}")
             print(f"   …{m['testo'][:160].strip()}…")
+            print(f"   {m['url']}")
+    elif a.cmd == "primo-saluto":
+        for m in primi_saluti(a.out):
+            print(f"{m['papa']} · {m['data']}")
+            print(f"   {m['titolo']}")
             print(f"   {m['url']}")
     return 0
 

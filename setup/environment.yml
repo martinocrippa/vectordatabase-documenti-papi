@@ -9,4 +9,4 @@ dependencies:
   - pip:
       # torch (cpu) arriva come dipendenza di sentence-transformers
       - sentence-transformers>=2.2
-      - rank-bm25>=0.2
+      - lancedb>=0.24          # store embedded + ricerca ibrida (vettori + full-text + RRF)

@@ -77,25 +77,26 @@ In [`doc/`](doc/):
 
 ## Stato
 
-Prima versione funzionante in [`vdb.py`](vdb.py): `build` costruisce l'indice
-(embeddings e5 + BM25, salvato in `indice/`) e `search` fa la **ricerca ibrida**
-(vettori + BM25 fusi con RRF). Inoltre: ogni chunk ha la **lingua**, i saluti
-tradotti sono **esclusi di default**, i risultati sono **deduplicati per
-documento**, e ci sono filtri per Papa, tipologia e lingua.
+Versione funzionante in [`vdb.py`](vdb.py): `build` costruisce una tabella
+**LanceDB** (vettori e5 + full-text, on-disk in `indice/`) e `search` fa la
+**ricerca ibrida nativa** (vettori + full-text fusi con RRF). Inoltre: chunking
+strutturale, ogni chunk con la **lingua** (saluti tradotti **esclusi di
+default**), risultati **deduplicati per documento**, filtri Papa/tipologia/lingua.
 
 ```bash
 pip install -r requirements.txt            # oppure conda: vedi setup/README.md
 python vdb.py build --per-papa 50          # indice da un campione (prova veloce)
 python vdb.py search "custodire il creato" --papa francesco
 python vdb.py search "lo sport e gli atleti" --lingua it   # solo italiano
+python vdb.py primo-saluto                 # i saluti "Urbi et Orbi" dopo l'elezione
 ```
 
 **Build sull'intero corpus:** è **lungo su CPU (ore)** — l'embedding di ~175.000
-chunk è il collo di bottiglia. Il `build` è **resumabile** (cache embedding +
-checkpoint dei chunk): se si interrompe, rilancialo e riprende. Finora
-indicizzato ~83% del corpus. Questi puntelli (cache/checkpoint) sono **interim**:
-la direzione è migrare lo store a **LanceDB** (vedi
-[doc/scelta-store.md](doc/scelta-store.md)).
+chunk è il collo di bottiglia (uno store non lo accelera: è calcolo). Il `build`
+è **resumabile**: LanceDB persiste ogni blocco e un checkpoint dei chunk
+(`meta.prepared.jsonl`) evita di rileggere il corpus, quindi al rilancio riprende.
+Lo store è stato migrato da file fatti a mano (vettori.npy/bm25.pkl/RRF) a
+**LanceDB** — perché e come in [doc/scelta-store.md](doc/scelta-store.md).
 
 **Primi risultati** (dalle domande di partenza): *"Francesco è comunista / senza
 continuità?"* → **continuità schiacciante**, accenti diversi, comunismo no. Il
@@ -120,6 +121,7 @@ scaricalo", quindi non serve gestire il download a mano. Il warning
 > `HF_HOME` a mano prima di lanciare `vdb.py`. Vedi
 > [setup/README.md](setup/README.md).
 
-Da fare (vedi [piano](doc/piano-di-sviluppo.md)): **migrazione a LanceDB**
-(store on-disk, ibrido nativo, incrementale → toglie cache/checkpoint),
-reranking col cross-encoder, chunking strutturale per tipologia.
+Da fare (vedi [piano](doc/piano-di-sviluppo.md)): **reranking** col cross-encoder,
+chunking strutturale per tipologia più fine. Già fatto: migrazione a **LanceDB**
+(store on-disk, ibrido nativo, ricerca flat — il confronto dei vector DB è in
+[doc/scelta-store.md](doc/scelta-store.md)).

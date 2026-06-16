@@ -26,67 +26,54 @@ ingestion si regge sui suoi:
 |---|---|
 | `documenti(data_dir)` | generatore: scorre `data/**.md`, separa frontmatter e corpo, restituisce un dict per documento. |
 | `pezzi(documento)` | spezza il corpo in **chunk** seguendo la struttura della tipologia (sezioni numerate/separatori/paragrafi) con overlap solo *dentro* la sezione, portandosi dietro i metadati. Ricetta per tipo in [`mappa-tipologie.md`](mappa-tipologie.md). |
-| `Embedder` | incapsula il modello locale di embedding; `encode(testi) -> matrice di vettori` (normalizzati). |
-| `Indice` | tiene i vettori (matrice NumPy) **e** un indice BM25 sui testi dei chunk, con i metadati paralleli; `aggiungi`, `salva`, `carica`, e i due retriever `per_vettore(q, k)` / `per_keyword(q, k)`. |
+| `Embedder` | incapsula il modello locale di embedding; `passaggi(testi)` / `query(q)` → vettori normalizzati. |
+| tabella **LanceDB** | lo store: vettori + testo (per il full-text/BM25) + metadati, on-disk in `indice/`. Sostituisce il vecchio `Indice` fatto a mano (vettori.npy + bm25.pkl + RRF). |
 
 E due funzioni di orchestrazione che le mettono in fila:
 
 | Funzione | Cosa fa |
 |---|---|
-| `costruisci(data_dir)` | `documenti → pezzi → Embedder.encode → Indice.salva`. Costruisce l'indice da zero (o in modo incrementale, vedi sotto). |
-| `cerca(query, k)` | **ricerca ibrida**: unisce i risultati vettoriali e BM25 dell'`Indice` con RRF, applica i filtri sui metadati, opzionalmente fa il reranking, e restituisce i chunk migliori. Dettaglio sotto. |
+| `costruisci(data_dir)` | `documenti → _segmenta/pezzi → Embedder → table.add` a blocchi. Incrementale e resumabile (riparte dal numero di righe già in tabella). |
+| `cerca(query, k)` | **ricerca ibrida nativa** LanceDB: vettori + full-text fusi con RRF, filtri sui metadati (papa/tipologia/lingua/escludibile), dedup per documento. |
 
-Si legge dall'alto in basso come una ricetta. Niente classi oltre alle due
-necessarie (`Embedder`, `Indice`, che incapsulano stato reale: il modello e la
-matrice); il resto sono funzioni pure su strutture dati elementari.
+Si legge dall'alto in basso come una ricetta. L'unica classe è `Embedder` (il
+modello); la persistenza e la ricerca le fa LanceDB, il resto sono funzioni pure.
 
-## Come è fatto l'indice (lo storage)
+## Come è fatto l'indice (lo storage: LanceDB)
 
-La scelta più semplice che regge il volume del corpus (vedi
-[`sintesi-corpus.md`](sintesi-corpus.md)):
+Lo store è una tabella **LanceDB** embedded, on-disk in `indice/` (più un
+checkpoint dei chunk preparati per riprendere il build):
 
 ```
 indice/
-  vettori.npy          # matrice float32 (N_chunk × dim), vettori L2-normalizzati
-  bm25.pkl             # indice BM25 sui testi dei chunk (lessico + statistiche)
-  meta.jsonl           # una riga JSON per chunk, nello stesso ordine della matrice
-  meta.prepared.jsonl  # (interim) checkpoint dei chunk preparati, per riprendere il build
-models/
-  emb_<modello>.pkl    # (interim) cache degli embedding per chunk (hash→vettore)
+  chunk.lance/         # tabella LanceDB: vettori + testo + metadati, con indice full-text
+  meta.prepared.jsonl  # checkpoint dei chunk preparati (testo+lingua), per riprendere il build
 ```
 
-- **Vettori** → un singolo array NumPy `float32`. Normalizzati a norma 1, così
-  la similarità coseno è un semplice prodotto scalare.
-- **BM25** → indice testuale sui chunk per la ricerca a parole chiave (forte sui
-  termini esatti e i nomi propri). Locale, niente server.
-- **Metadati** → `meta.jsonl`, una riga per chunk: `papa`, `tipologia`, `data`,
-  `titolo`, `url`, indice del chunk, il **testo** (serve al BM25 e a mostrare il
-  risultato), più tre campi di lingua: `lingua` (del chunk), `lingua_doc`
-  (prevalente del documento) ed `escludibile` (chunk in lingua diversa dal
-  documento = saluto tradotto, fuori dalla ricerca di default).
+Colonne della tabella, una riga per chunk: `vector` (embedding e5), `testo`
+(serve al full-text/BM25 e a mostrare il risultato), i metadati `papa`,
+`tipologia`, `data`, `titolo`, `url`, e i campi `sezione` (corpo/saluti),
+`lingua`, `escludibile` (saluto o chunk in lingua diversa dal documento → fuori
+dalla ricerca di default). Un **indice full-text** (Tantivy) sulla colonna
+`testo` abilita la parte BM25 della ricerca ibrida.
 
-> ⚠️ **`meta.jsonl` (e l'indice BM25) contengono spezzoni dei testi originali**,
-> quindi è **materiale sotto copyright**: l'intera cartella `indice/` è in
-> `.gitignore`, come `data/`. Si rigenera in locale. Non si versiona, non si
-> pubblica.
+> ⚠️ **La tabella contiene spezzoni dei testi originali**, quindi è **materiale
+> sotto copyright**: l'intera cartella `indice/` è in `.gitignore`, come `data/`.
+> Si rigenera in locale. Non si versiona, non si pubblica.
 
-### Persistenza: stato e direzione (→ LanceDB)
+### Perché LanceDB (e perché niente indice ANN)
 
-La **ricerca** con NumPy brute-force regge benissimo questo volume (coseno su
-~175k vettori = millisecondi): lì un DB non serve. Il problema è emerso nel
-**build sull'intero corpus**: la persistenza fatta a mano (cache embedding +
-`meta.prepared` + ri-salvataggi) è diventata fragile — la cache da ~450 MB
-ricaricata a ogni run, tenuta in RAM, checkpoint con stato. `emb_*.pkl` e
-`meta.prepared.jsonl` sono **puntelli interim**, nati per finire il build su CPU.
-
-**Decisione: migrare `Indice` a [LanceDB](scelta-store.md)** — store embedded,
-on-disk memory-mapped, `add()` incrementale e persistente, con **ibrido
-vettori + BM25 + RRF nativo**. Elimina cache/checkpoint/`bm25.pkl`/`vettori.npy`
-e `_rrf`/`per_vettore`/`per_keyword` (≈ metà del plumbing), lasciando invariati
-`documenti`/`_segmenta`/`pezzi`/`_lingua`/`Embedder`. Non accelera l'embedding
-(quello resta calcolo su CPU), ma toglie la fragilità di salvataggio/ripresa.
-Dettaglio e confronto (Chroma, sqlite-vec, Qdrant) in
-[`scelta-store.md`](scelta-store.md). **MongoDB Atlas** scartato: è cloud → i
+La **ricerca** non era il problema (coseno su ~175k vettori = millisecondi). Il
+dolore era la **persistenza del build** fatta a mano (cache embedding da ~450 MB
+ricaricata a ogni run, checkpoint con stato) e l'**ibrido** tenuto a mano (`_rrf`,
+`per_vettore`, `per_keyword`). LanceDB risolve entrambi: store embedded on-disk,
+`add()` incrementale e persistente, e **ibrido vettori + full-text + RRF nativo**.
+La migrazione ha **eliminato** cache/`vettori.npy`/`bm25.pkl`/`_rrf`/`per_*`
+(≈ metà del plumbing), lasciando invariati `documenti`/`_segmenta`/`pezzi`/
+`_lingua`/`Embedder`. **Niente indice ANN**: a 175k vettori si usa la ricerca
+flat (recall esatto, zero tuning) — l'IVF-PQ serve da milioni in su. Confronto
+completo (sqlite-vec, DuckDB, Chroma, Qdrant) in [`scelta-store.md`](scelta-store.md).
+**MongoDB Atlas** scartato: è cloud → i
 testi (© LEV) uscirebbero dalla macchina.
 
 ## Ricerca ibrida (vettori + BM25 + reranking)

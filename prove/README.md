@@ -101,6 +101,7 @@ diversi.
   checkpoint hanno permesso di finire il build su CPU a rilanci, ma alla scala
   dell'intero corpus (~175k chunk, cache ~450 MB ricaricata ogni volta) è
   **fragile**.
-- **Decisione: migrare a LanceDB** (store embedded on-disk, ibrido nativo,
-  `add()` incrementale) → elimina cache/checkpoint e ~metà del plumbing. Dettaglio
-  e confronto in [`../doc/scelta-store.md`](../doc/scelta-store.md).
+- **Fatto: migrato a LanceDB** (store embedded on-disk, ibrido vettori+full-text+
+  RRF nativo, `add()` incrementale) → rimossi cache embedding, `vettori.npy`,
+  `bm25.pkl`, `_rrf`/`per_*` (~metà del plumbing). Perché e confronto in
+  [`../doc/scelta-store.md`](../doc/scelta-store.md).
