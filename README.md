@@ -90,6 +90,8 @@ python vdb.py build --per-papa 50          # indice da un campione (prova veloce
 python vdb.py search "custodire il creato" --papa francesco
 python vdb.py search "lo sport e gli atleti" --lingua it   # solo italiano
 python vdb.py primo-saluto                 # i saluti "Urbi et Orbi" dopo l'elezione
+python vdb.py arricchisci                  # marca i chunk con la famiglia di argomento
+python vdb.py search "ambiente e clima" --famiglia attualità   # filtra per famiglia
 ```
 
 **Build sull'intero corpus:** è **lungo su CPU (ore)** — l'embedding di ~175.000

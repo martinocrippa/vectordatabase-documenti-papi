@@ -164,9 +164,10 @@ Un `test/` con smoke test arriverà quando il modulo si stabilizza.
 Le analisi del repo di text mining assegnano a ogni chunk un'**etichetta-argomento**
 (le "famiglie" per significato; in prospettiva i topic estratti). L'architettura
 prevede di **riportarle nell'indice** come campi, così diventano interrogabili e le
-analisi non le ricalcolano ogni volta. **Da fare, non ancora implementato.**
+analisi non le ricalcolano ogni volta. **Fatto** per la famiglia: i campi
+`famiglia` e `famiglia_sim` sono nell'indice (indice scalare su `famiglia`).
 
-Piano del comando `python vdb.py arricchisci`:
+Cosa fa `python vdb.py arricchisci`:
 1. apre la tabella e **rilegge i vettori** a blocchi (niente re-embedding);
 2. calcola `famiglia` = ancora più vicina (prodotto vettore·ancore, in **torch** per
    il noto conflitto MKL su Windows) + `famiglia_sim` (confidenza);

@@ -25,6 +25,8 @@ Uso:
     python vdb.py search "cosa dice sulla pace?"
     python vdb.py search "..." --papa francesco --tipo angelus --lingua it -k 8
     python vdb.py search "..." --tutto       # includi i saluti tradotti
+    python vdb.py arricchisci                # marca ogni chunk con la famiglia di argomento
+    python vdb.py search "..." --famiglia attualità   # filtra per famiglia (dopo arricchisci)
 """
 
 from __future__ import annotations
@@ -58,6 +60,18 @@ PREF_Q, PREF_P = "query: ", "passage: "     # e5 vuole questi prefissi
 PAROLE_CHUNK = 180
 BATCH = 2000                                # chunk per blocco di embedding/add
 CAMPI = ("papa", "tipologia", "data", "titolo", "url")
+
+# Tassonomia degli argomenti: ogni famiglia ha un'ancora semantica. `arricchisci`
+# marca ogni chunk con la famiglia la cui ancora gli e' piu' vicina (per
+# significato, nessuna soglia). Rinfrescabile: cambia qui le ancore e rilancia.
+FAMIGLIE = {
+    "liturgia": "la liturgia e i sacramenti: la santa Messa, l'Eucaristia, l'anno liturgico, l'Avvento, il Natale, la Quaresima, la Pasqua, la Pentecoste",
+    "fede e devozione": "Dio, Gesù Cristo, lo Spirito Santo, la Vergine Maria e i santi, la preghiera, il Vangelo, la fede e la salvezza",
+    "eventi e ricorrenze": "udienze e incontri con gruppi, categorie, istituzioni; ricorrenze, anniversari, giubilei; i corpi e le accademie; le visite ad limina dei vescovi",
+    "viaggi": "i viaggi apostolici e le visite pastorali, l'arrivo e il saluto nei Paesi visitati, le nazioni e i popoli incontrati lungo il cammino",
+    "programma e storia": "il programma del pontificato e il suo segno nella storia: la dottrina sociale, l'ecumenismo e il dialogo, il rapporto coi grandi eventi storici del tempo",
+    "attualità": "i temi dell'attualità: la pace e le guerre, i migranti e i rifugiati, l'ambiente e il clima, l'economia e il lavoro, la tecnologia e l'intelligenza artificiale",
+}
 
 
 # --- primitive ---------------------------------------------------------------
@@ -303,12 +317,49 @@ def primi_saluti(out="indice") -> list[dict]:
     return risultati
 
 
-def cerca(query: str, k=5, papa=None, tipo=None, lingua=None, tutto=False,
-          out="indice", n=60) -> list[dict]:
+def arricchisci(out="indice"):
+    """Marca ogni chunk con la 'famiglia' di argomento (per significato) e la
+    confidenza, riscrivendo la tabella con i campi famiglia/famiglia_sim.
+
+    Rilegge i vettori gia' indicizzati (niente re-embedding): embedda solo le 6
+    ancore, prende per ogni chunk l'ancora piu' vicina (argmax del coseno, nessuna
+    soglia) e ricostruisce la tabella (rebuild+swap). Separato dal build e
+    rinfrescabile: cambia le ancore in FAMIGLIE e rilancia.
+    """
+    import torch                 # il matmul va in torch (conflitto MKL di numpy su Windows)
+    import pyarrow as pa
+    nomi = list(FAMIGLIE)
+    emb = Embedder()
+    ancore = torch.from_numpy(
+        np.stack([emb.query(v) for v in FAMIGLIE.values()]).astype("float32"))
+    db = lancedb.connect(out)
+    t = db.open_table("chunk").search().limit(10 ** 9).to_arrow()
+    for c in ("famiglia", "famiglia_sim"):       # idempotente: via le colonne vecchie
+        if c in t.column_names:
+            t = t.drop([c])
+    V = torch.from_numpy(np.stack(t.column("vector").to_pylist()).astype("float32"))
+    sim = V @ ancore.T
+    idx = sim.argmax(1).tolist()
+    best = sim.max(1).values.tolist()
+    t = t.append_column("famiglia", pa.array([nomi[i] for i in idx], pa.string()))
+    t = t.append_column("famiglia_sim", pa.array([float(s) for s in best], pa.float32()))
+    db.drop_table("chunk")
+    tab = db.create_table("chunk", data=t)
+    tab.create_fts_index("testo", replace=True)   # gli indici si ricreano dopo lo swap
+    tab.create_scalar_index("famiglia")
+    conta = collections.Counter(nomi[i] for i in idx)
+    print(f"Arricchiti {len(idx)} chunk con 'famiglia':")
+    for n in nomi:
+        print(f"  {n:22} {conta[n]:6}  ({100 * conta[n] / len(idx):4.1f}%)")
+    return tab
+
+
+def cerca(query: str, k=5, papa=None, tipo=None, lingua=None, famiglia=None,
+          tutto=False, out="indice", n=60) -> list[dict]:
     """Ricerca ibrida nativa LanceDB: vettori + full-text fusi con RRF.
 
     Di default esclude i chunk "escludibili" (saluti/tradotti); `tutto=True` li
-    reinclude. Filtri su papa, tipologia, lingua. Dedup per documento.
+    reinclude. Filtri su papa, tipologia, lingua, famiglia. Dedup per documento.
     """
     emb = Embedder()
     tab = lancedb.connect(out).open_table("chunk")
@@ -317,6 +368,8 @@ def cerca(query: str, k=5, papa=None, tipo=None, lingua=None, tutto=False,
         conds.append(f"lingua = '{lingua}'")
     if tipo:
         conds.append(f"tipologia = '{tipo}'")
+    if famiglia:
+        conds.append(f"famiglia = '{famiglia}'")
     q = tab.search(query_type="hybrid").vector(emb.query(query)).text(query).limit(n)
     if conds:
         q = q.where(" AND ".join(conds), prefilter=True)
@@ -354,6 +407,8 @@ def main() -> int:
     s.add_argument("--papa", default=None)
     s.add_argument("--tipo", default=None)
     s.add_argument("--lingua", default=None, help="filtra i chunk per lingua (es. it)")
+    s.add_argument("--famiglia", default=None,
+                   help="filtra per famiglia di argomento (richiede `arricchisci`)")
     s.add_argument("--tutto", action="store_true",
                    help="includi anche i chunk escludibili (saluti/tradotti)")
     s.add_argument("--out", default=str(ROOT / "indice"))
@@ -362,13 +417,21 @@ def main() -> int:
                         help="i primi saluti 'Urbi et Orbi' dopo l'elezione (uno per Papa)")
     ps.add_argument("--out", default=str(ROOT / "indice"))
 
+    ar = sub.add_parser("arricchisci",
+                        help="marca ogni chunk con la famiglia di argomento (per significato)")
+    ar.add_argument("--out", default=str(ROOT / "indice"))
+
     a = ap.parse_args()
     if a.cmd == "build":
         costruisci(a.data, a.out, a.per_papa)
+    elif a.cmd == "arricchisci":
+        arricchisci(a.out)
     elif a.cmd == "search":
-        for r, m in enumerate(cerca(a.query, a.k, a.papa, a.tipo,
-                                    a.lingua, a.tutto, a.out), 1):
-            print(f"{r}. {m['papa']} · {m['tipologia']} · {m['data']} · [{m.get('lingua', '?')}]")
+        for r, m in enumerate(cerca(a.query, a.k, papa=a.papa, tipo=a.tipo,
+                                    lingua=a.lingua, famiglia=a.famiglia,
+                                    tutto=a.tutto, out=a.out), 1):
+            fam = f"/{m['famiglia']}" if m.get("famiglia") else ""
+            print(f"{r}. {m['papa']} · {m['tipologia']} · {m['data']} · [{m.get('lingua', '?')}{fam}]")
             print(f"   {m['titolo']}")
             print(f"   …{m['testo'][:160].strip()}…")
             print(f"   {m['url']}")
