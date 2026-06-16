@@ -15,9 +15,9 @@ In piu':
   - pesi del modello in models/ (HF_HOME), non nella cache utente.
 
 Il build sull'intero corpus e' lungo su CPU (l'embedding e' il collo di bottiglia)
-ma resumabile: i chunk preparati sono in indice/meta.prepared.jsonl e LanceDB
-persiste ogni blocco aggiunto, quindi al rilancio si riparte dalle righe gia'
-presenti (niente re-embedding).
+ma resumabile e idempotente: i chunk preparati sono in indice/meta.prepared.jsonl
+e al rilancio si saltano i documenti gia' in tabella (per url) -- niente
+re-embedding e niente doppioni, anche con esecuzioni concorrenti.
 
 Uso:
     python vdb.py build                      # costruisce/aggiorna l'indice da data/
@@ -239,8 +239,9 @@ def _prepara(data_dir, out_p, per_papa):
 def costruisci(data_dir="data", out="indice", per_papa=None):
     """Prepara i chunk, li embedda a blocchi e li scrive in una tabella LanceDB.
 
-    Resumabile: LanceDB persiste ogni blocco; al rilancio si riparte dal numero
-    di righe già presenti. Un campione (--per-papa) ricrea la tabella da zero.
+    Idempotente: al rilancio salta i documenti già in tabella (per url), quindi
+    riprende senza doppioni anche con build concorrenti. Un campione (--per-papa)
+    ricrea la tabella da zero.
     """
     emb = Embedder()
     out_p = pathlib.Path(out)
@@ -255,17 +256,23 @@ def costruisci(data_dir="data", out="indice", per_papa=None):
     if per_papa is not None and tab is not None:
         db.drop_table("chunk")                       # campione: tabella fresca
         tab = None
-    start = tab.count_rows() if tab is not None else 0
-    print(f"{len(meta)} chunk; già nell'indice: {start}. Embedding + scrittura...")
-    for i in range(start, len(meta), BATCH):
-        blocco = meta[i:i + BATCH]
+    # Idempotente: salta i documenti già indicizzati per URL (non per conteggio
+    # righe). Così rilanci e build concorrenti non creano doppioni.
+    fatti = set()
+    if tab is not None:
+        fatti = {r["url"] for r in tab.search().select(["url"]).limit(10 ** 9).to_list()}
+    da_fare = [m for m in meta if m["url"] not in fatti]
+    print(f"{len(meta)} chunk; {len(meta) - len(da_fare)} già indicizzati, "
+          f"{len(da_fare)} da fare.")
+    for i in range(0, len(da_fare), BATCH):
+        blocco = da_fare[i:i + BATCH]
         vecs = emb.passaggi([m["testo"] for m in blocco])
         righe = [_riga(m, v) for m, v in zip(blocco, vecs)]
         if tab is None:
             tab = db.create_table("chunk", data=righe)
         else:
             tab.add(righe)
-        print(f"  indicizzati {min(i + BATCH, len(meta))}/{len(meta)}")
+        print(f"  indicizzati {min(i + BATCH, len(da_fare))}/{len(da_fare)}")
     if tab is not None:
         tab.create_fts_index("testo", replace=True)   # full-text/BM25 per l'ibrido
         print(f"Indice LanceDB pronto: {tab.count_rows()} chunk in {out}/")
