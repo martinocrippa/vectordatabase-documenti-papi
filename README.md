@@ -72,8 +72,9 @@ In [`doc/`](doc/):
   decisione di migrare a **LanceDB**.
 - [`doc/piano-di-sviluppo.md`](doc/piano-di-sviluppo.md) — gli stadi di sviluppo,
   uno per volta.
-- [`prove/`](prove/) — esperimenti (regex vs embedding, ibrido, temi) e una
-  [sintesi divulgativa](prove/sintesi-per-un-amico.md) dei risultati.
+- Le **analisi** sui dati (temi per Papa, parole vs significato, sintesi
+  divulgativa) vivono nel repo di text mining, come notebook rieseguibili:
+  `textmining-documenti-papi/analisi/`.
 
 ## Stato
 
@@ -100,7 +101,7 @@ Lo store è stato migrato da file fatti a mano (vettori.npy/bm25.pkl/RRF) a
 
 **Primi risultati** (dalle domande di partenza): *"Francesco è comunista / senza
 continuità?"* → **continuità schiacciante**, accenti diversi, comunismo no. Il
-racconto in [prove/sintesi-per-un-amico.md](prove/sintesi-per-un-amico.md).
+racconto e le analisi nei notebook di `textmining-documenti-papi/analisi/`.
 
 Dettagli sull'ambiente (conda/venv) in [setup/README.md](setup/README.md).
 

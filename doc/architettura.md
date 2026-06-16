@@ -78,21 +78,22 @@ testi (© LEV) uscirebbero dalla macchina.
 
 ## Ricerca ibrida (vettori + BM25 + reranking)
 
-Lezione di un **esperimento** iniziale (vedi `prove/ambiente_semantico.py` e
-l'aggiornamento in `risultati-preliminari.md` nel repo di ingestion): i due
+Lezione di un **esperimento** iniziale (ora analisi rieseguibile in
+`textmining-documenti-papi/analisi/02-parole-vs-significato.ipynb`): i due
 metodi non vanno messi *uno contro l'altro*, ma **insieme**. Da soli:
 
 - i **vettori** colgono il significato (`casa comune` ≈ `ambiente`) ma sono
   sfocati e le loro similarità **non sono calibrate** (nessuna soglia "naturale");
 - **BM25** è preciso sui termini esatti e i nomi propri, ma cieco ai sinonimi.
 
-La pipeline di `cerca(query, k)` — implementata in `vdb.py`:
+La pipeline di `cerca(query, k)` — implementata in `vdb.py` sulla ricerca ibrida
+**nativa** di LanceDB:
 
-1. **Due retriever in parallelo** sull'`Indice`: top-N per **vettore** (coseno) e
-   top-N per **keyword** (BM25).
-2. **Fusione con Reciprocal Rank Fusion (RRF)**: si combinano i due *ranking*
-   (non i punteggi grezzi, così si evita di dover calibrare scale diverse).
-   Poche righe, nessuna soglia.
+1. **Due retriever** sull'indice LanceDB: top-N per **vettore** (coseno) e top-N
+   per **full-text/BM25**.
+2. **Fusione con Reciprocal Rank Fusion (RRF)** (il `RRFReranker` di LanceDB): si
+   combinano i due *ranking* (non i punteggi grezzi, così si evita di calibrare
+   scale diverse). Nessuna soglia.
 3. **Filtri sui metadati**: esclusi di default i chunk `escludibile` (saluti
    tradotti); poi `papa`, `tipologia`, `lingua` (`--tutto` reinclude tutto).
 4. **Deduplica per documento**: un solo chunk (il migliore) per documento, così
@@ -147,17 +148,16 @@ Un solo modulo, come il repo di ingestion. Si divide solo se e quando cresce.
 
 ```
 vdb.py            # le primitive + la CLI (un file, struttura piatta)
-prove/            # esperimenti (versionati): hanno guidato le scelte di disegno
 indice/           # output rigenerabile, NON versionato (.gitignore)
 models/           # pesi del modello (HF_HOME), NON versionato (.gitignore)
 requirements.txt
 setup/environment.yml
 ```
 
-Gli **esperimenti** in `prove/` (es. `ambiente_semantico.py`,
-`cerca_passaggi.py`, `esperimento_sport.py`) restano come memoria del *perché*
-delle scelte (soglie, ibrido, lingua); non sono codice di produzione. Un
-`test/` con smoke test arriverà quando il modulo si stabilizza.
+Gli **esperimenti** che hanno guidato le scelte (soglie, ibrido, lingua) sono
+diventati analisi rieseguibili nel repo di text mining
+(`textmining-documenti-papi/analisi/`): qui resta solo il codice di produzione.
+Un `test/` con smoke test arriverà quando il modulo si stabilizza.
 
 ## Dipendenze (minime)
 
