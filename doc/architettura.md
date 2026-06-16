@@ -159,6 +159,27 @@ diventati analisi rieseguibili nel repo di text mining
 (`textmining-documenti-papi/analisi/`): qui resta solo il codice di produzione.
 Un `test/` con smoke test arriverà quando il modulo si stabilizza.
 
+## Arricchimento dei chunk (topic / famiglia) — piano
+
+Le analisi del repo di text mining assegnano a ogni chunk un'**etichetta-argomento**
+(le "famiglie" per significato; in prospettiva i topic estratti). L'architettura
+prevede di **riportarle nell'indice** come campi, così diventano interrogabili e le
+analisi non le ricalcolano ogni volta. **Da fare, non ancora implementato.**
+
+Piano del comando `python vdb.py arricchisci`:
+1. apre la tabella e **rilegge i vettori** a blocchi (niente re-embedding);
+2. calcola `famiglia` = ancora più vicina (prodotto vettore·ancore, in **torch** per
+   il noto conflitto MKL su Windows) + `famiglia_sim` (confidenza);
+3. scrive la colonna: via **rebuild+swap** (collaudato, come la dedup) oppure un `id`
+   stabile sui chunk + `merge_insert` (non riscrive tutto);
+4. `create_scalar_index("famiglia")` per il filtro veloce.
+
+Resa: `search … --famiglia attualità` / `where("famiglia='attualità'")`, e i notebook
+leggono la colonna invece di ricalcolare. La **tassonomia** (le ancore) vive come
+costante qui; il comando è **separato dal build** e **rinfrescabile** quando la
+tassonomia evolve. Eventuali topic emergenti vanno salvati come **etichetta stabile**
+(un nome), non come numero di cluster (che cambia a ogni ricostruzione).
+
 ## Dipendenze (minime)
 
 | Pacchetto | Perché |
